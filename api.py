@@ -1290,11 +1290,10 @@ REPORT_HTML_TEMPLATE = """
     }
     .hero{
       display:grid;
-      grid-template-columns: 1.25fr .75fr;
+      grid-template-columns: 1fr;
       gap:14px;
       align-items:stretch;
     }
-    @media (max-width: 980px){ .hero{grid-template-columns:1fr;}}
     .h1{margin:0; font-size:28px; letter-spacing:-.35px}
     .meta{margin-top:8px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; color:var(--muted); font-size:13px}
     .pill{
@@ -1314,9 +1313,36 @@ REPORT_HTML_TEMPLATE = """
     .scoreNum{font-size:44px; font-weight:900; letter-spacing:-.8px; line-height:1}
     .scoreSub{margin-top:8px; color:var(--muted); font-size:13px}
     .status{margin-top:10px; color:var(--muted); font-size:13px}
+    .scoreboardCard{
+      display:flex; flex-direction:column;
+      padding:18px; border-radius: var(--radius);
+      border:1px solid rgba(255,255,255,.12);
+      background: linear-gradient(135deg, rgba(122,162,255,.16), rgba(124,247,195,.10));
+    }
+    .scoreboardTop{display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:14px;}
+    .scoreboardPrimary{display:flex; flex-direction:column; gap:4px;}
+    .scoreLarge{font-size:52px; font-weight:900; letter-spacing:-.9px; line-height:1;}
+    .scoreLabel{font-size:13px; color:var(--muted); margin-top:4px;}
+    .scoreSecondary{display:flex; flex-direction:column; align-items:flex-end; gap:4px;}
+    .scoreMedium{font-size:32px; font-weight:900; letter-spacing:-.6px; line-height:1;}
+    .verdictChip{
+      padding:6px 12px; border-radius:999px;
+      border:1px solid rgba(255,255,255,.18);
+      background: rgba(0,0,0,.22);
+      font-size:12px; font-weight:600;
+      color:rgba(232,238,252,.92);
+      margin-top:4px;
+      white-space:nowrap;
+    }
+    .miniBars{display:grid; gap:6px; margin-top:8px;}
+    .miniBarRow{display:grid; gap:4px;}
+    .miniBarLabel{font-size:11px; color:rgba(232,238,252,.78); text-transform:uppercase; letter-spacing:.3px;}
+    .miniTrack{height:6px; border-radius:999px; background:rgba(255,255,255,.10); overflow:hidden; border:1px solid rgba(255,255,255,.10); position:relative;}
+    .miniFill{position:absolute; left:0; top:0; height:100%; border-radius:999px; background:linear-gradient(90deg, rgba(122,162,255,.85), rgba(124,247,195,.75));}
+    .miniScore{font-size:11px; color:rgba(232,238,252,.88); font-weight:700;}
     .grid{
       display:grid;
-      grid-template-columns: 1fr 1fr 1fr;
+      grid-template-columns: 1fr 1fr 1fr 1fr;
       gap:14px;
       margin-top:14px;
     }
@@ -1410,15 +1436,23 @@ REPORT_HTML_TEMPLATE = """
         <div class="shots" id="imgs"></div>
         <div id="errs"></div>
       </div>
-
-      <div class="panel scoreBox">
-        <div class="scoreNum" id="score10">--</div>
-        <div class="scoreSub">Patient-flow score (0–10) and total (0–60)</div>
-        <div class="status" id="score60">Total: --/60</div>
-      </div>
     </div>
 
     <div class="grid">
+      <div class="panel scoreboardCard">
+        <div class="scoreboardTop">
+          <div class="scoreboardPrimary">
+            <div class="scoreLarge" id="score60Main">--</div>
+            <div class="scoreLabel">out of 60</div>
+          </div>
+          <div class="scoreSecondary">
+            <div class="scoreMedium" id="score10Main">--</div>
+            <div class="scoreLabel">out of 10</div>
+            <div class="verdictChip" id="verdictChip">—</div>
+          </div>
+        </div>
+        <div class="miniBars" id="miniScoreBars"></div>
+      </div>
       <div class="panel">
         <h2>Scores</h2>
         <div class="bars" id="scoreBars"></div>
@@ -1504,6 +1538,33 @@ function renderBars(scores) {
     row.innerHTML = `
       <div class="barTop"><span>${esc(label)}</span><span>${v}/10</span></div>
       <div class="track"><div class="fill" style="width:${pct}%"></div></div>
+    `;
+    wrap.appendChild(row);
+  }
+}
+
+function renderMiniBars(scores) {
+  const wrap = document.getElementById("miniScoreBars");
+  wrap.innerHTML = "";
+  const order = [
+    ["clarity_first_impression","Clarity"],
+    ["booking_path","Booking"],
+    ["mobile_experience","Mobile"],
+    ["trust_and_proof","Trust"],
+    ["treatments_and_offer","Treatments"],
+    ["tech_basics","Tech"],
+  ];
+  for (const [k, label] of order) {
+    const v = Number((scores||{})[k] ?? 0);
+    const pct = Math.max(0, Math.min(100, (v/10)*100));
+    const row = document.createElement("div");
+    row.className = "miniBarRow";
+    row.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <span class="miniBarLabel">${esc(label)}</span>
+        <span class="miniScore">${v}</span>
+      </div>
+      <div class="miniTrack"><div class="miniFill" style="width:${pct}%"></div></div>
     `;
     wrap.appendChild(row);
   }
@@ -1623,10 +1684,14 @@ async function tick() {
     if (url) { a.href = url; a.textContent = url.replace(/^https?:\/\//,""); }
 
     document.getElementById("band").textContent = score.band || "—";
-    document.getElementById("score10").textContent = (score.patient_flow_score_10 ?? "--");
-    document.getElementById("score60").textContent = "Total: " + (score.total_score_60 ?? "--") + "/60";
+    
+    // Update ScoreboardCard
+    document.getElementById("score10Main").textContent = (score.patient_flow_score_10 ?? "--");
+    document.getElementById("score60Main").textContent = (score.total_score_60 ?? "--");
+    document.getElementById("verdictChip").textContent = score.band || "—";
 
     renderBars(score.scores || {});
+    renderMiniBars(score.scores || {});
     setList("strengths", score.strengths || []);
     setList("leaks", score.leaks || []);
     setList("quickWins", score.quick_wins || []);
