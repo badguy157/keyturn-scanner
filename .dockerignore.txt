@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+artifacts/
+patientflow.sqlite
+.DS_Store
+.git/

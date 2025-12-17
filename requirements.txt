@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+beautifulsoup4
+playwright
+openai
+pydantic
