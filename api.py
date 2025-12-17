@@ -1309,7 +1309,7 @@ REPORT_HTML_TEMPLATE = """
       background: rgba(0,0,0,.18);
       color: rgba(232,238,252,.88);
     }
-    .status{margin-top:4px; color:var(--muted); font-size:13px}
+    .status{margin-top:8px; color:var(--muted); font-size:13px}
     .summaryRow{
       display:grid;
       grid-template-columns: 1fr 1fr;
@@ -1377,9 +1377,6 @@ REPORT_HTML_TEMPLATE = """
     .fill{height:100%; width:0%; border-radius:999px; background:linear-gradient(90deg, rgba(122,162,255,.85), rgba(124,247,195,.75));}
     ul{margin:0; padding-left:18px; color:rgba(232,238,252,.84)}
     li{margin:8px 0; line-height:1.35}
-    .screenshotsCard{
-      display:flex; flex-direction:column;
-    }
     .shots{display:flex; gap:12px; flex-wrap:wrap; margin-top:12px; align-items:flex-start;}
     figure{
       margin:0;
