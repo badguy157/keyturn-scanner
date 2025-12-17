@@ -1498,8 +1498,61 @@ REPORT_HTML_TEMPLATE = """
       border-radius:999px;
       background:linear-gradient(90deg, rgba(122,162,255,.85), rgba(124,247,195,.75));
     }
-    ul{margin:0; padding-left:18px; color:rgba(232,238,252,.84)}
-    li{margin:8px 0; line-height:1.35}
+    ul{margin:0; padding:0; list-style:none; color:rgba(232,238,252,.84)}
+    li{
+      margin:10px 0;
+      padding:12px;
+      border-radius:12px;
+      border:1px solid rgba(255,255,255,.08);
+      background: rgba(255,255,255,.03);
+      line-height:1.4;
+      display:flex;
+      gap:12px;
+      align-items:flex-start;
+    }
+    .itemIcon{
+      flex-shrink:0;
+      width:20px;
+      height:20px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      font-size:14px;
+      margin-top:2px;
+    }
+    .itemContent{
+      flex:1;
+      min-width:0;
+    }
+    .itemTitle{
+      font-weight:700;
+      color:rgba(232,238,252,.95);
+      margin-bottom:4px;
+      font-size:14px;
+    }
+    .itemWhy{
+      color:rgba(232,238,252,.75);
+      font-size:13px;
+      line-height:1.4;
+      margin-bottom:6px;
+    }
+    .itemEvidence{
+      display:inline-flex;
+      align-items:center;
+      gap:4px;
+      font-size:12px;
+      color:rgba(122,162,255,.92);
+      text-decoration:none;
+      padding:4px 8px;
+      border-radius:6px;
+      background:rgba(122,162,255,.10);
+      border:1px solid rgba(122,162,255,.20);
+      transition:background 0.2s;
+      margin-top:4px;
+    }
+    .itemEvidence:hover{
+      background:rgba(122,162,255,.18);
+    }
     .err{
       background: rgba(255, 70, 70, .10);
       border: 1px solid rgba(255, 70, 70, .20);
@@ -1678,10 +1731,65 @@ function setList(id, items) {
   const el = document.getElementById(id);
   const arr = Array.isArray(items) ? items : [];
   if (!arr.length) {
-    el.innerHTML = "<li>None listed.</li>";
+    el.innerHTML = `<li>
+      <div class="itemIcon">—</div>
+      <div class="itemContent">
+        <div class="itemWhy">None listed.</div>
+      </div>
+    </li>`;
     return;
   }
-  el.innerHTML = arr.slice(0, 12).map(x => "<li>" + esc(x) + "</li>").join("");
+  
+  // Icon mappings for different sections
+  const icons = {
+    'strengths': '✓',
+    'leaks': '⚠',
+    'quickWins': '⚡'
+  };
+  const icon = icons[id] || '•';
+  
+  el.innerHTML = arr.slice(0, 12).map(item => {
+    // Handle both string items (old format) and structured items (new format)
+    if (typeof item === 'string') {
+      // Legacy format: plain string
+      return `<li>
+        <div class="itemIcon">${icon}</div>
+        <div class="itemContent">
+          <div class="itemWhy">${esc(item)}</div>
+        </div>
+      </li>`;
+    } else if (item && typeof item === 'object') {
+      // New structured format
+      const title = item.title ? `<div class="itemTitle">${esc(item.title)}</div>` : '';
+      const why = item.why ? `<div class="itemWhy">${esc(item.why)}</div>` : '';
+      const evidence = item.evidence ? 
+        `<a href="#${esc(item.evidence)}" class="itemEvidence" data-anchor="${esc(item.evidence)}">
+          <span>📸</span>
+          <span>View evidence</span>
+        </a>` : '';
+      
+      return `<li>
+        <div class="itemIcon">${icon}</div>
+        <div class="itemContent">
+          ${title}
+          ${why}
+          ${evidence}
+        </div>
+      </li>`;
+    }
+    return '';
+  }).join("");
+  
+  // Add event listeners for evidence links (using event delegation after DOM update)
+  el.querySelectorAll('.itemEvidence').forEach(link => {
+    link.addEventListener('click', (e) => {
+      e.preventDefault();
+      const anchor = link.getAttribute('data-anchor');
+      if (anchor) {
+        scrollToScreenshot(anchor);
+      }
+    });
+  });
 }
 
 function renderBars(scores) {
@@ -1889,6 +1997,38 @@ async function copyJsonNow() {
 }
 
 const copyBtn = document.getElementById('copyJson');
+if (copyBtn) {
+  copyBtn.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); copyJsonNow(); });
+  copyBtn.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); ev.stopPropagation(); copyJsonNow(); }
+  });
+}
+
+function scrollToScreenshot(anchor) {
+  // Map anchor names to tab and potentially scroll to specific section
+  const tabMap = {
+    'desktop': 'desktop',
+    'mobile': 'mobile',
+    'mobile-top': 'mobile',
+    'mobile-mid': 'mobile',
+    'mobile-bottom': 'mobile'
+  };
+  
+  const tab = tabMap[anchor] || 'desktop';
+  
+  // Activate the correct tab
+  const tabButton = document.querySelector(`.tab[data-tab="${tab}"]`);
+  if (tabButton) {
+    tabButton.click();
+  }
+  
+  // Scroll to the screenshots section
+  const screenshotsSection = document.querySelector('.screenshotsCard');
+  if (screenshotsSection) {
+    screenshotsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
 if (copyBtn) {
   copyBtn.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); copyJsonNow(); });
   copyBtn.addEventListener('keydown', (ev) => {
