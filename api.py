@@ -1613,7 +1613,7 @@ function isValidUrl(u) {
   if (!u) return false;
   const s = ("" + u).trim();
   if (!s) return false;
-  return s.startsWith("/artifacts/") || s.startsWith("http://") || s.startsWith("https://");
+  return s.startsWith("/artifacts/") || s.startsWith("http://") || s.startsWith("https://") || s.startsWith("data:");
 }
 
 function setList(id, items) {
