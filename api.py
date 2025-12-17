@@ -1589,7 +1589,8 @@ REPORT_HTML_TEMPLATE = """
     }
     .quickWinCheckbox.checked{
       background:linear-gradient(135deg, rgba(122,162,255,.45), rgba(124,247,195,.30));
-      border-color:rgba(122,162,255,.75);
+      border-color:rgba(122,162,255,.85);
+      border-width:2.5px;
     }
     .quickWinCheckbox.checked::after{
       content:'✓';
