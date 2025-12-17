@@ -1834,6 +1834,13 @@ function isValidUrl(u) {
 const IMPACT_ORDER = { 'High': 3, 'Med': 2, 'Low': 1 };
 const EFFORT_ORDER = { 'Low': 3, 'Med': 2, 'High': 1 };
 
+// Normalize impact/effort values to handle case variations
+function normalizeValue(value, defaultValue, validValues) {
+  if (!value) return defaultValue;
+  const normalized = value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
+  return validValues.includes(normalized) ? normalized : defaultValue;
+}
+
 function setList(id, items) {
   const el = document.getElementById(id);
   const arr = Array.isArray(items) ? items : [];
@@ -1853,10 +1860,11 @@ function setList(id, items) {
       // Handle both old string format and new object format
       if (typeof a === 'string' || typeof b === 'string') return 0;
       
-      const impactDiff = (IMPACT_ORDER[a.impact] || 0) - (IMPACT_ORDER[b.impact] || 0);
+      // Use 1 (lowest priority) as fallback for invalid values
+      const impactDiff = (IMPACT_ORDER[a.impact] || 1) - (IMPACT_ORDER[b.impact] || 1);
       if (impactDiff !== 0) return -impactDiff; // High impact first
       
-      const effortDiff = (EFFORT_ORDER[a.effort] || 0) - (EFFORT_ORDER[b.effort] || 0);
+      const effortDiff = (EFFORT_ORDER[a.effort] || 1) - (EFFORT_ORDER[b.effort] || 1);
       return -effortDiff; // Low effort first
     });
     
@@ -1871,9 +1879,9 @@ function setList(id, items) {
         </li>`;
       } else if (item && typeof item === 'object' && item.action) {
         // New structured format with checkbox and chips
-        // Normalize values to handle case variations
-        const impact = (item.impact || 'Med').charAt(0).toUpperCase() + (item.impact || 'Med').slice(1).toLowerCase();
-        const effort = (item.effort || 'Med').charAt(0).toUpperCase() + (item.effort || 'Med').slice(1).toLowerCase();
+        // Normalize values to handle case variations and ensure valid CSS classes
+        const impact = normalizeValue(item.impact, 'Med', ['High', 'Med', 'Low']);
+        const effort = normalizeValue(item.effort, 'Med', ['Low', 'Med', 'High']);
         
         const impactClass = `chipImpact${impact}`;
         const effortClass = `chipEffort${effort}`;
