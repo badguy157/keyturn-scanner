@@ -1292,12 +1292,16 @@ REPORT_HTML_TEMPLATE = """
       padding:10px 14px; border-radius:999px;
       border:1px solid rgba(255,255,255,.14);
       font-weight:700;
+      cursor:pointer;
+      transition:filter 0.2s;
     }
     .btn{
       background:linear-gradient(135deg, rgba(122,162,255,.30), rgba(124,247,195,.16));
       box-shadow: 0 10px 30px rgba(0,0,0,.35);
     }
+    .btn:hover{filter:brightness(1.06);}
     .btn2{background: rgba(255,255,255,.06);}
+    .btn2:hover{filter:brightness(1.1);}
     .panel{
       background:linear-gradient(180deg, var(--card), rgba(255,255,255,.04));
       border:1px solid var(--line);
@@ -1693,6 +1697,16 @@ REPORT_HTML_TEMPLATE = """
     }
     .copyBtn:hover{filter:brightness(1.07)}
     pre{margin:12px 0 0; background:#0b0f19; color:#cfe3ff; padding:14px; border-radius:14px; overflow:auto; border:1px solid rgba(255,255,255,.08)}
+    
+    /* Print styles for PDF */
+    @media print {
+      body{background:white; color:black;}
+      .topbar, .modal, #rawWrap{display:none !important;}
+      .btn, .btn2{display:none !important;}
+      .panel{border:1px solid #ddd; box-shadow:none; background:white; page-break-inside:avoid;}
+      .wrap{max-width:100%; padding:10px;}
+      .scoreRing{print-color-adjust:exact; -webkit-print-color-adjust:exact;}
+    }
   </style>
 </head>
 <body>
@@ -1717,6 +1731,10 @@ REPORT_HTML_TEMPLATE = """
           <span class="pill">Mode: __MODE__</span>
         </div>
         <div class="status" id="status">Loading...</div>
+      </div>
+      <div class="actions">
+        <button class="btn2" id="copyLinkBtn" onclick="copyReportLink()">Copy report link</button>
+        <button class="btn2" id="downloadPdfBtn" onclick="downloadPDF()">Download PDF</button>
       </div>
     </div>
 
@@ -1805,6 +1823,34 @@ const debug = params.get('debug') === '1';
 
 const rawWrap = document.getElementById('rawWrap');
 if (rawWrap) rawWrap.style.display = debug ? 'block' : 'none';
+
+// Copy report link function
+async function copyReportLink() {
+  const btn = document.getElementById('copyLinkBtn');
+  const originalText = btn.textContent;
+  try {
+    await navigator.clipboard.writeText(window.location.href);
+    btn.textContent = "Link copied!";
+    setTimeout(() => { btn.textContent = originalText; }, 2000);
+  } catch (e) {
+    // Fallback for browsers that don't support clipboard API
+    const ta = document.createElement('textarea');
+    ta.value = window.location.href;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    btn.textContent = "Link copied!";
+    setTimeout(() => { btn.textContent = originalText; }, 2000);
+  }
+}
+
+// Download PDF function (triggers print dialog)
+function downloadPDF() {
+  window.print();
+}
 
 const KEY_LABELS = {
   "home_desktop_top": "Desktop (top)",
