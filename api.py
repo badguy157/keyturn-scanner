@@ -1320,6 +1320,70 @@ REPORT_HTML_TEMPLATE = """
     .screenshotsCard{
       display:flex; flex-direction:column;
     }
+    .tabs{
+      display:flex; gap:8px; margin-bottom:14px; border-bottom:1px solid var(--line);
+    }
+    .tab{
+      padding:10px 16px; cursor:pointer; position:relative;
+      color:var(--muted); font-weight:600; font-size:13px;
+      border:none; background:none; transition:color 0.2s;
+    }
+    .tab:hover{color:var(--text);}
+    .tab.active{color:var(--text);}
+    .tab.active::after{
+      content:''; position:absolute; bottom:-1px; left:0; right:0;
+      height:2px; background:linear-gradient(90deg, var(--accent), var(--accent2));
+    }
+    .tabContent{display:none;}
+    .tabContent.active{display:block;}
+    .thumbGrid{
+      display:grid; grid-template-columns:repeat(auto-fill, minmax(160px, 1fr));
+      gap:12px; margin-top:12px;
+    }
+    .thumb{
+      position:relative; border-radius:12px; overflow:hidden; cursor:pointer;
+      border:1px solid rgba(255,255,255,.12); background:rgba(255,255,255,.04);
+      transition:transform 0.2s, box-shadow 0.2s;
+    }
+    .thumb:hover{
+      transform:translateY(-2px);
+      box-shadow:0 8px 20px rgba(0,0,0,.4);
+    }
+    .thumb img{display:block; width:100%; height:auto; background:#fff;}
+    .thumbLabel{
+      padding:8px 10px; font-size:11px; color:rgba(232,238,252,.72);
+      background:rgba(0,0,0,.3);
+    }
+    .modal{
+      display:none; position:fixed; inset:0; z-index:1000;
+      background:rgba(0,0,0,.92); align-items:center; justify-content:center;
+    }
+    .modal.active{display:flex;}
+    .modalContent{
+      position:relative; max-width:90vw; max-height:90vh;
+      display:flex; flex-direction:column; align-items:center;
+    }
+    .modalImg{
+      max-width:100%; max-height:80vh; border-radius:12px;
+      box-shadow:0 20px 60px rgba(0,0,0,.8);
+    }
+    .modalLabel{
+      margin-top:12px; font-size:14px; color:var(--text);
+      padding:8px 16px; border-radius:999px;
+      background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.14);
+    }
+    .modalClose, .modalNav{
+      position:absolute; width:48px; height:48px; border-radius:50%;
+      background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.20);
+      display:flex; align-items:center; justify-content:center;
+      cursor:pointer; color:var(--text); font-size:24px; font-weight:700;
+      transition:background 0.2s;
+    }
+    .modalClose:hover, .modalNav:hover{background:rgba(255,255,255,.16);}
+    .modalClose{top:20px; right:20px;}
+    .modalNav{top:50%; transform:translateY(-50%);}
+    .modalPrev{left:20px;}
+    .modalNext{right:20px;}
     .scoreboardCard{
       display:flex; flex-direction:column;
       padding:18px; border-radius: var(--radius);
@@ -1377,17 +1441,6 @@ REPORT_HTML_TEMPLATE = """
     .fill{height:100%; width:0%; border-radius:999px; background:linear-gradient(90deg, rgba(122,162,255,.85), rgba(124,247,195,.75));}
     ul{margin:0; padding-left:18px; color:rgba(232,238,252,.84)}
     li{margin:8px 0; line-height:1.35}
-    .shots{display:flex; gap:12px; flex-wrap:wrap; margin-top:12px; align-items:flex-start;}
-    figure{
-      margin:0;
-      border-radius:16px;
-      border:1px solid rgba(255,255,255,.12);
-      background: rgba(255,255,255,.04);
-      overflow:hidden;
-      max-width:340px;
-    }
-    img{display:block; width:100%; height:auto; background:#fff;}
-    figcaption{padding:10px 10px; font-size:12px; color:rgba(232,238,252,.72)}
     .err{
       background: rgba(255, 70, 70, .10);
       border: 1px solid rgba(255, 70, 70, .20);
@@ -1479,7 +1532,16 @@ REPORT_HTML_TEMPLATE = """
       </div>
       <div class="panel screenshotsCard">
         <h2>Screenshots</h2>
-        <div class="shots" id="imgs"></div>
+        <div class="tabs">
+          <button class="tab active" data-tab="desktop">Desktop</button>
+          <button class="tab" data-tab="mobile">Mobile</button>
+        </div>
+        <div class="tabContent active" id="desktop-tab">
+          <div class="thumbGrid" id="desktopGrid"></div>
+        </div>
+        <div class="tabContent" id="mobile-tab">
+          <div class="thumbGrid" id="mobileGrid"></div>
+        </div>
         <div id="errs"></div>
       </div>
     </div>
@@ -1517,6 +1579,16 @@ REPORT_HTML_TEMPLATE = """
     </div>
   </div>
 
+  <div class="modal" id="modal">
+    <div class="modalContent">
+      <div class="modalClose" id="modalClose">&times;</div>
+      <div class="modalNav modalPrev" id="modalPrev">&lsaquo;</div>
+      <div class="modalNav modalNext" id="modalNext">&rsaquo;</div>
+      <img class="modalImg" id="modalImg" src="" alt="Screenshot">
+      <div class="modalLabel" id="modalLabel"></div>
+    </div>
+  </div>
+
 <script>
 const scanId = "__SCAN_ID__";
 const params = new URLSearchParams(window.location.search);
@@ -1532,13 +1604,16 @@ const KEY_LABELS = {
   "home_mobile_bottom": "Mobile (bottom)"
 };
 
+let currentImages = [];
+let currentIndex = 0;
+
 function esc(s){ return (""+s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 
 function isValidUrl(u) {
   if (!u) return false;
   const s = ("" + u).trim();
   if (!s) return false;
-  return s.startsWith("/artifacts/") || s.startsWith("http://") || s.startsWith("https://");
+  return s.startsWith("/artifacts/") || s.startsWith("http://") || s.startsWith("https://") || s.startsWith("data:");
 }
 
 function setList(id, items) {
@@ -1602,32 +1677,112 @@ function renderMiniBars(scores) {
   }
 }
 
-function renderImages(manifest, fallbackUrls) {
-  const wrap = document.getElementById('imgs');
-  wrap.innerHTML = "";
-  const items = (manifest && manifest.length) ? manifest : (fallbackUrls||[]).map(u => ({url:u, key:""}));
+function openModal(images, index) {
+  currentImages = images;
+  currentIndex = index;
+  const modal = document.getElementById('modal');
+  const img = document.getElementById('modalImg');
+  const label = document.getElementById('modalLabel');
+  
+  img.src = currentImages[currentIndex].url;
+  label.textContent = currentImages[currentIndex].label;
+  modal.classList.add('active');
+  document.body.style.overflow = 'hidden';
+}
 
+function closeModal() {
+  const modal = document.getElementById('modal');
+  modal.classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+function showPrev() {
+  if (currentImages.length === 0) return;
+  currentIndex = (currentIndex - 1 + currentImages.length) % currentImages.length;
+  const img = document.getElementById('modalImg');
+  const label = document.getElementById('modalLabel');
+  img.src = currentImages[currentIndex].url;
+  label.textContent = currentImages[currentIndex].label;
+}
+
+function showNext() {
+  if (currentImages.length === 0) return;
+  currentIndex = (currentIndex + 1) % currentImages.length;
+  const img = document.getElementById('modalImg');
+  const label = document.getElementById('modalLabel');
+  img.src = currentImages[currentIndex].url;
+  label.textContent = currentImages[currentIndex].label;
+}
+
+function renderImages(manifest, fallbackUrls) {
+  const desktopGrid = document.getElementById('desktopGrid');
+  const mobileGrid = document.getElementById('mobileGrid');
+  desktopGrid.innerHTML = "";
+  mobileGrid.innerHTML = "";
+  
+  const items = (manifest && manifest.length) ? manifest : (fallbackUrls||[]).map(u => ({url:u, key:""}));
+  
+  const desktopImages = [];
+  const mobileImages = [];
   const seen = new Set();
+  
   for (const it of items) {
     const u = (it && it.url) ? ("" + it.url).trim() : "";
     if (!isValidUrl(u)) continue;
     if (seen.has(u)) continue;
     seen.add(u);
-
-    const fig = document.createElement("figure");
-    const img = document.createElement('img');
-    img.src = u;
-    img.loading = "lazy";
-    img.alt = it.key || "screenshot";
-    img.onerror = () => { try { fig.remove(); } catch(e) {} };
-
-    const cap = document.createElement("figcaption");
-    cap.textContent = KEY_LABELS[it.key] || (it.key ? it.key : "Screenshot");
-
-    fig.appendChild(img);
-    fig.appendChild(cap);
-    wrap.appendChild(fig);
+    
+    const label = KEY_LABELS[it.key] || (it.key ? it.key : "Screenshot");
+    const imgData = { url: u, key: it.key, label: label };
+    
+    if (it.key && it.key.startsWith('home_desktop')) {
+      desktopImages.push(imgData);
+    } else if (it.key && it.key.startsWith('home_mobile')) {
+      mobileImages.push(imgData);
+    }
   }
+  
+  // Render desktop thumbnails
+  desktopImages.forEach((imgData, idx) => {
+    const thumb = document.createElement('div');
+    thumb.className = 'thumb';
+    thumb.onclick = () => openModal(desktopImages, idx);
+    
+    const img = document.createElement('img');
+    img.src = imgData.url;
+    img.loading = 'lazy';
+    img.alt = imgData.label;
+    img.onerror = () => { try { thumb.remove(); } catch(e) {} };
+    
+    const thumbLabel = document.createElement('div');
+    thumbLabel.className = 'thumbLabel';
+    thumbLabel.textContent = imgData.label;
+    
+    thumb.appendChild(img);
+    thumb.appendChild(thumbLabel);
+    desktopGrid.appendChild(thumb);
+  });
+  
+  // Render mobile thumbnails
+  mobileImages.forEach((imgData, idx) => {
+    const thumb = document.createElement('div');
+    thumb.className = 'thumb';
+    thumb.onclick = () => openModal(mobileImages, idx);
+    
+    const img = document.createElement('img');
+    img.src = imgData.url;
+    img.loading = 'lazy';
+    img.alt = imgData.label;
+    img.onerror = () => { try { thumb.remove(); } catch(e) {} };
+    
+    const thumbLabel = document.createElement('div');
+    thumbLabel.className = 'thumbLabel';
+    thumbLabel.textContent = imgData.label;
+    
+    thumb.appendChild(img);
+    thumb.appendChild(thumbLabel);
+    mobileGrid.appendChild(thumb);
+  });
 }
 
 function renderErrors(errs) {
@@ -1678,6 +1833,45 @@ if (copyBtn) {
     if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); ev.stopPropagation(); copyJsonNow(); }
   });
 }
+
+// Tab switching
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    const targetTab = tab.dataset.tab;
+    
+    // Update tab buttons
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    
+    // Update tab content
+    document.querySelectorAll('.tabContent').forEach(tc => tc.classList.remove('active'));
+    document.getElementById(targetTab + '-tab').classList.add('active');
+  });
+});
+
+// Modal controls
+document.getElementById('modalClose').addEventListener('click', closeModal);
+document.getElementById('modalPrev').addEventListener('click', showPrev);
+document.getElementById('modalNext').addEventListener('click', showNext);
+
+// Modal background click to close
+document.getElementById('modal').addEventListener('click', (e) => {
+  if (e.target.id === 'modal') closeModal();
+});
+
+// Keyboard navigation for modal
+document.addEventListener('keydown', (e) => {
+  const modal = document.getElementById('modal');
+  if (!modal.classList.contains('active')) return;
+  
+  if (e.key === 'Escape') {
+    closeModal();
+  } else if (e.key === 'ArrowLeft') {
+    showPrev();
+  } else if (e.key === 'ArrowRight') {
+    showNext();
+  }
+});
 
 async function tick() {
   const res = await fetch('/api/scan/' + scanId);
