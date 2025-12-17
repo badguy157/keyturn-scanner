@@ -1251,6 +1251,9 @@ REPORT_HTML_TEMPLATE = """
       --accent2:#7cf7c3;
       --shadow: 0 20px 60px rgba(0,0,0,.55);
       --radius: 18px;
+      --ring-color: rgba(122,162,255,.75);
+      --ring-bg: rgba(255,255,255,.08);
+      --ring-thickness: 62%;
     }
     *{box-sizing:border-box}
     body{
@@ -1318,13 +1321,13 @@ REPORT_HTML_TEMPLATE = """
       position:absolute; inset:0; border-radius:50%;
       background:conic-gradient(
         from -90deg,
-        rgba(122,162,255,.75) 0%,
-        rgba(122,162,255,.75) var(--progress, 0%),
-        rgba(255,255,255,.08) var(--progress, 0%),
-        rgba(255,255,255,.08) 100%
+        var(--ring-color) 0%,
+        var(--ring-color) var(--progress, 0%),
+        var(--ring-bg) var(--progress, 0%),
+        var(--ring-bg) 100%
       );
-      mask:radial-gradient(circle, transparent 0%, transparent 62%, black 62%, black 100%);
-      -webkit-mask:radial-gradient(circle, transparent 0%, transparent 62%, black 62%, black 100%);
+      mask:radial-gradient(circle, transparent 0%, transparent var(--ring-thickness), black var(--ring-thickness), black 100%);
+      -webkit-mask:radial-gradient(circle, transparent 0%, transparent var(--ring-thickness), black var(--ring-thickness), black 100%);
     }
     .scoreRingInner{position:relative; z-index:1; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;}
     .scoreLarge{font-size:52px; font-weight:900; letter-spacing:-.9px; line-height:1.2;}
@@ -1707,7 +1710,7 @@ async function tick() {
     
     // Update the radial progress ring
     const ringEl = document.getElementById("scoreRing");
-    if (ringEl && total60 > 0) {
+    if (ringEl) {
       const progressPct = (total60 / MAX_SCORE) * 100;
       ringEl.style.setProperty('--progress', progressPct + '%');
     }
