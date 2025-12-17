@@ -27,7 +27,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -183,8 +183,8 @@ class PatientFlowScores(BaseModel):
 
 class QuickWinItem(BaseModel):
     action: str = Field(..., description="The action text describing what to do")
-    impact: str = Field(..., description="Impact level: High, Med, or Low")
-    effort: str = Field(..., description="Effort level: Low, Med, or High")
+    impact: Literal["High", "Med", "Low"] = Field(..., description="Impact level: High, Med, or Low")
+    effort: Literal["Low", "Med", "High"] = Field(..., description="Effort level: Low, Med, or High")
 
 
 class PatientFlowAIOutput(BaseModel):
@@ -1830,6 +1830,10 @@ function isValidUrl(u) {
   return s.startsWith("/artifacts/") || s.startsWith("http://") || s.startsWith("https://") || s.startsWith("data:");
 }
 
+// Quick wins sorting constants
+const IMPACT_ORDER = { 'High': 3, 'Med': 2, 'Low': 1 };
+const EFFORT_ORDER = { 'Low': 3, 'Med': 2, 'High': 1 };
+
 function setList(id, items) {
   const el = document.getElementById(id);
   const arr = Array.isArray(items) ? items : [];
@@ -1845,18 +1849,14 @@ function setList(id, items) {
   
   // Special handling for quick wins with checkboxes and chips
   if (id === 'quickWins') {
-    // Sort quick wins: High impact first, then Low effort
-    const impactOrder = { 'High': 3, 'Med': 2, 'Low': 1 };
-    const effortOrder = { 'Low': 3, 'Med': 2, 'High': 1 };
-    
     const sortedItems = [...arr].sort((a, b) => {
       // Handle both old string format and new object format
       if (typeof a === 'string' || typeof b === 'string') return 0;
       
-      const impactDiff = (impactOrder[a.impact] || 0) - (impactOrder[b.impact] || 0);
+      const impactDiff = (IMPACT_ORDER[a.impact] || 0) - (IMPACT_ORDER[b.impact] || 0);
       if (impactDiff !== 0) return -impactDiff; // High impact first
       
-      const effortDiff = (effortOrder[a.effort] || 0) - (effortOrder[b.effort] || 0);
+      const effortDiff = (EFFORT_ORDER[a.effort] || 0) - (EFFORT_ORDER[b.effort] || 0);
       return -effortDiff; // Low effort first
     });
     
@@ -1871,16 +1871,20 @@ function setList(id, items) {
         </li>`;
       } else if (item && typeof item === 'object' && item.action) {
         // New structured format with checkbox and chips
-        const impactClass = `chipImpact${item.impact || 'Med'}`;
-        const effortClass = `chipEffort${item.effort || 'Med'}`;
+        // Normalize values to handle case variations
+        const impact = (item.impact || 'Med').charAt(0).toUpperCase() + (item.impact || 'Med').slice(1).toLowerCase();
+        const effort = (item.effort || 'Med').charAt(0).toUpperCase() + (item.effort || 'Med').slice(1).toLowerCase();
+        
+        const impactClass = `chipImpact${impact}`;
+        const effortClass = `chipEffort${effort}`;
         
         return `<li>
           <div class="quickWinCheckbox" data-index="${idx}" role="checkbox" aria-checked="false" tabindex="0"></div>
           <div class="itemContent">
             <div class="quickWinAction">${esc(item.action)}</div>
             <div class="quickWinChips">
-              <span class="chip chipImpact ${impactClass}">Impact: ${esc(item.impact || 'Med')}</span>
-              <span class="chip chipEffort ${effortClass}">Effort: ${esc(item.effort || 'Med')}</span>
+              <span class="chip chipImpact ${impactClass}">Impact: ${esc(impact)}</span>
+              <span class="chip chipEffort ${effortClass}">Effort: ${esc(effort)}</span>
             </div>
           </div>
         </li>`;
