@@ -1,4 +1,4 @@
-# api.py (v0.9) - Patient-Flow Scanner w/ AI scoring (OpenAI Responses API)
+# api.py (v1.0) - Patient-Flow Scanner w/ AI scoring (OpenAI Responses API)
 # Run:
 #   python -m pip install -U fastapi uvicorn beautifulsoup4 playwright openai
 #   python -m playwright install chromium
@@ -34,7 +34,7 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, conint
 from playwright.sync_api import sync_playwright
 
 # Import OpenAI safely so missing module doesn't crash the whole server at import-time.
@@ -171,8 +171,44 @@ class ScanRequest(BaseModel):
     email: Optional[str] = None
 
 
+# ---- Structured output model (Option A) ----
+class PatientFlowScores(BaseModel):
+    clarity_first_impression: conint(ge=0, le=10)
+    booking_path: conint(ge=0, le=10)
+    mobile_experience: conint(ge=0, le=10)
+    trust_and_proof: conint(ge=0, le=10)
+    treatments_and_offer: conint(ge=0, le=10)
+    tech_basics: conint(ge=0, le=10)
+
+
+class PatientFlowAIOutput(BaseModel):
+    clinic_name: str = Field(..., description="Clinic name inferred from the site")
+    scores: PatientFlowScores
+    strengths: List[str] = Field(default_factory=list)
+    leaks: List[str] = Field(default_factory=list)
+    quick_wins: List[str] = Field(default_factory=list)
+
+
+def _model_to_dict(m: Any) -> Dict[str, Any]:
+    if hasattr(m, "model_dump"):
+        return m.model_dump()  # pydantic v2
+    if hasattr(m, "dict"):
+        return m.dict()  # pydantic v1
+    return dict(m)
+
+
 def now_iso() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+def _ai_ready() -> (bool, str):
+    if SCORING_MODE != "ai":
+        return True, ""
+    if OpenAI is None:
+        return False, "AI mode needs the 'openai' package. Run: python -m pip install -U openai"
+    if not os.getenv("OPENAI_API_KEY"):
+        return False, "AI mode needs OPENAI_API_KEY. In PowerShell: $env:OPENAI_API_KEY=\"sk-...\""
+    return True, ""
 
 
 # Simple signals
@@ -183,8 +219,20 @@ BEFORE_AFTER_RE = re.compile(r"\bbefore\s*(?:and|&|/)\s*after\b", re.I)
 GOOGLE_REVIEWS_RE = re.compile(r"\bgoogle\b.*\breview", re.I)
 
 OUTCOME_WORDS = [
-    "results", "before", "after", "younger", "tighten", "lift", "reduce", "clear",
-    "improve", "refresh", "natural", "confidence", "glow", "brighter",
+    "results",
+    "before",
+    "after",
+    "younger",
+    "tighten",
+    "lift",
+    "reduce",
+    "clear",
+    "improve",
+    "refresh",
+    "natural",
+    "confidence",
+    "glow",
+    "brighter",
 ]
 
 MIME_BY_EXT = {
@@ -413,7 +461,6 @@ def _get_scroll_positions(page) -> Dict[str, int]:
     except Exception:
         max_y = 0
 
-    # Better coverage than 0/35/85 on pages with sticky headers and long hero sections
     mid = int(max_y * 0.45)
     bot = int(max_y * 0.90)
     return {"top": 0, "mid": mid, "bottom": bot}
@@ -644,115 +691,166 @@ def _post_guardrails(output: Dict[str, Any], evidence: Dict[str, Any]) -> Dict[s
 
 
 def ai_score_patient_flow(target_url: str, evidence: Dict[str, Any]) -> Dict[str, Any]:
-    if OpenAI is None:
-        raise RuntimeError("Missing python package 'openai'. Run: python -m pip install -U openai")
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("Missing OPENAI_API_KEY env var")
+    ok, msg = _ai_ready()
+    if not ok:
+        raise RuntimeError(msg)
 
-    client = OpenAI()
+    client = OpenAI()  # type: ignore
 
     home_d = evidence.get("home_desktop", {})
     home_m = evidence.get("home_mobile", {})
 
     evidence_payload = {
         "target_url": target_url,
-        "home_desktop": {k: home_d.get(k) for k in [
-            "final_url", "title", "h1",
-            "cta_links", "tel_links", "mailto_links",
-            "word_count", "img_count", "internal_link_count",
-            "proof_hits", "outcome_hits", "coming_soon",
-            "form_count", "input_count",
-            "font_count", "center_count", "marquee_count", "table_count", "has_frames",
-            "has_media_queries", "fixed_width_hits",
-            "load_seconds", "text_sample", "nav_link_texts",
-            "screenshot_urls",
-        ]},
-        "home_mobile": {k: home_m.get(k) for k in [
-            "final_url", "title", "h1",
-            "meta_viewport", "mobile_overflow",
-            "word_count", "img_count",
-            "proof_hits",
-            "form_count", "input_count",
-            "has_media_queries", "fixed_width_hits",
-            "load_seconds", "text_sample",
-            "screenshot_urls",
-        ]},
+        "home_desktop": {
+            k: home_d.get(k)
+            for k in [
+                "final_url",
+                "title",
+                "h1",
+                "cta_links",
+                "tel_links",
+                "mailto_links",
+                "word_count",
+                "img_count",
+                "internal_link_count",
+                "proof_hits",
+                "outcome_hits",
+                "coming_soon",
+                "form_count",
+                "input_count",
+                "font_count",
+                "center_count",
+                "marquee_count",
+                "table_count",
+                "has_frames",
+                "has_media_queries",
+                "fixed_width_hits",
+                "load_seconds",
+                "text_sample",
+                "nav_link_texts",
+                "screenshot_urls",
+            ]
+        },
+        "home_mobile": {
+            k: home_m.get(k)
+            for k in [
+                "final_url",
+                "title",
+                "h1",
+                "meta_viewport",
+                "mobile_overflow",
+                "word_count",
+                "img_count",
+                "proof_hits",
+                "form_count",
+                "input_count",
+                "has_media_queries",
+                "fixed_width_hits",
+                "load_seconds",
+                "text_sample",
+                "screenshot_urls",
+            ]
+        },
         "notes": {
             "screenshots": "Use screenshots to judge design quality + mobile usability (do not over-index on raw HTML text).",
             "booking_scoring_hint": "Booking path is about discoverability + clicks. A long booking form can be noted as a leak without tanking booking_path.",
         },
     }
 
-    prompt = f"""
+    sys_prompt = f"""
 You are scoring a clinic website using this rubric ONLY.
 
 {RUBRIC_TEXT}
 
 {WORKED_EXAMPLES}
 
-Rules:
-- Return JSON only. No markdown. No commentary outside JSON.
+Scoring rules:
 - Each category score must be an integer 0–10.
-- total_score_60 must equal the sum of the 6 category scores.
-- patient_flow_score_10 must equal total_score_60 / 6, rounded to 1 decimal.
 - Use calibration examples to avoid score inflation: 8+ should be rare unless it truly matches the GOLD example vibe.
 - Booking path is about how obvious + low-click the "Book/Consult" path is. If the form itself is long, keep booking_path high if the path is still obvious; list form friction under leaks/quick_wins.
+- Write strengths/leaks/quick_wins as short, plain bullets (no essays). Be specific.
 
-Output JSON shape:
-{{
-  "clinic_name": "string",
-  "url": "string",
-  "scores": {{
-    "clarity_first_impression": 0,
-    "booking_path": 0,
-    "mobile_experience": 0,
-    "trust_and_proof": 0,
-    "treatments_and_offer": 0,
-    "tech_basics": 0
-  }},
-  "total_score_60": 0,
-  "patient_flow_score_10": 0.0,
-  "band": "string",
-  "strengths": ["..."],
-  "leaks": ["..."],
-  "quick_wins": ["..."]
-}}
-
-EVIDENCE_JSON:
-{json.dumps(evidence_payload, indent=2)}
+Return output that fits the required JSON schema.
 """.strip()
 
-    content: List[Dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+    # Multi-part user content: evidence + screenshots (as data URLs)
+    content: List[Dict[str, Any]] = [
+        {
+            "type": "input_text",
+            "text": "EVIDENCE_JSON:\n" + json.dumps(evidence_payload, indent=2),
+        }
+    ]
 
+    # Desktop: send 1 screenshot if available
     for u in (home_d.get("screenshot_urls") or [])[:1]:
         img = _img_to_data_url(u)
         if img:
             content.append({"type": "input_image", "image_url": img})
 
+    # Mobile: send up to 3 screenshots if available
     for u in (home_m.get("screenshot_urls") or [])[:3]:
         img = _img_to_data_url(u)
         if img:
             content.append({"type": "input_image", "image_url": img})
 
     last_err: Optional[Exception] = None
-    for model in [m for m in OPENAI_MODEL_FALLBACKS if m]:
+
+    # Dedup + keep order
+    seen_models: set = set()
+    models_to_try: List[str] = []
+    for m in [x for x in OPENAI_MODEL_FALLBACKS if x]:
+        if m not in seen_models:
+            seen_models.add(m)
+            models_to_try.append(m)
+
+    for model in models_to_try:
         try:
-            resp = client.responses.create(
-                model=model,
-                input=[{"role": "user", "content": content}],
-                temperature=0.1,
-            )
-            raw = (resp.output_text or "").strip()
+            # Option A: Structured outputs (preferred)
+            if hasattr(client.responses, "parse"):
+                try:
+                    resp = client.responses.parse(
+                        model=model,
+                        input=[
+                            {"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": content},
+                        ],
+                        text_format=PatientFlowAIOutput,
+                        temperature=0.1,
+                    )
+                except TypeError:
+                    # Some SDK versions don't accept temperature on parse()
+                    resp = client.responses.parse(
+                        model=model,
+                        input=[
+                            {"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": content},
+                        ],
+                        text_format=PatientFlowAIOutput,
+                    )
 
-            try:
-                data = json.loads(raw)
-            except Exception:
-                m = re.search(r"\{.*\}", raw, flags=re.S)
-                if not m:
-                    raise RuntimeError(f"AI returned non-JSON. First 400 chars: {raw[:400]}")
-                data = json.loads(m.group(0))
+                parsed = getattr(resp, "output_parsed", None)
+                if parsed is None:
+                    raise RuntimeError("AI returned no parsed output (output_parsed is None).")
 
-            scores = data.get("scores", {}) or {}
+                data = _model_to_dict(parsed)
+            else:
+                # Fallback (older SDK): plain create + manual JSON parse
+                resp = client.responses.create(
+                    model=model,
+                    input=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": content}],
+                    temperature=0.1,
+                )
+                raw = (getattr(resp, "output_text", "") or "").strip()
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    m = re.search(r"\{.*\}", raw, flags=re.S)
+                    if not m:
+                        raise RuntimeError(f"AI returned non-JSON. First 400 chars: {raw[:400]}")
+                    data = json.loads(m.group(0))
+
+            scores = (data.get("scores") or {}) if isinstance(data, dict) else {}
             fixed_scores = {
                 "clarity_first_impression": _clamp_int(scores.get("clarity_first_impression")),
                 "booking_path": _clamp_int(scores.get("booking_path")),
@@ -764,23 +862,28 @@ EVIDENCE_JSON:
             total = sum(fixed_scores.values())
             score10 = round(total / 6.0, 1)
 
-            data["scores"] = fixed_scores
-            data["total_score_60"] = total
-            data["patient_flow_score_10"] = score10
-            data["band"] = band_from_score(score10)
-            data["clinic_name"] = (data.get("clinic_name") or "").strip() or infer_clinic_name(
-                home_d.get("title", ""), home_d.get("h1", ""), target_url
-            )
-            data["url"] = str(target_url)
-            data["debug"] = {
-                "mode": "ai",
-                "ai_model_used": model,
-                "home_desktop_final_url": home_d.get("final_url"),
-                "home_mobile_final_url": home_m.get("final_url"),
+            out: Dict[str, Any] = {
+                "clinic_name": (data.get("clinic_name") or "").strip()
+                or infer_clinic_name(home_d.get("title", ""), home_d.get("h1", ""), target_url),
+                "url": str(target_url),
+                "scores": fixed_scores,
+                "total_score_60": total,
+                "patient_flow_score_10": score10,
+                "band": band_from_score(score10),
+                "strengths": (data.get("strengths") or [])[:20],
+                "leaks": (data.get("leaks") or [])[:20],
+                "quick_wins": (data.get("quick_wins") or [])[:20],
+                "debug": {
+                    "mode": "ai",
+                    "ai_model_used": model,
+                    "home_desktop_final_url": home_d.get("final_url"),
+                    "home_mobile_final_url": home_m.get("final_url"),
+                    "structured_output": bool(hasattr(client.responses, "parse")),
+                },
             }
 
-            data = _post_guardrails(data, evidence)
-            return data
+            out = _post_guardrails(out, evidence)
+            return out
 
         except Exception as e:
             last_err = e
@@ -1068,12 +1171,31 @@ def home():
     return html
 
 
+@app.get("/health")
+def health():
+    ok, msg = _ai_ready()
+    return {
+        "ok": True,
+        "scoring_mode": SCORING_MODE,
+        "openai_installed": OpenAI is not None,
+        "has_openai_key": bool(os.getenv("OPENAI_API_KEY")),
+        "openai_model_env": os.getenv("OPENAI_MODEL", OPENAI_MODEL_DEFAULT),
+        "ai_ready": ok,
+        "ai_message": msg or None,
+    }
+
+
 @app.post("/api/scan")
 def create_scan(req: ScanRequest):
     email = (req.email or "").strip() or None
     if email and not EMAIL_RE.match(email):
-        # Be strict but friendly
         raise HTTPException(status_code=422, detail="Email looks invalid. Leave it blank or use a real address.")
+
+    # Fail fast (better than creating a scan that will just error later)
+    if SCORING_MODE == "ai":
+        ok, msg = _ai_ready()
+        if not ok:
+            raise HTTPException(status_code=500, detail=msg)
 
     scan_id = uuid.uuid4().hex
     conn = db()
@@ -1445,7 +1567,6 @@ async function copyJsonNow() {
     if (btn) btn.textContent = "Copied";
     setTimeout(() => { if (btn) btn.textContent = "Copy JSON"; }, 1200);
   } catch (e) {
-    // fallback
     const ta = document.createElement('textarea');
     ta.value = text;
     document.body.appendChild(ta);
