@@ -1267,7 +1267,7 @@ REPORT_HTML_TEMPLATE = """
     .wrap{max-width:1120px; margin:0 auto; padding:22px 18px 64px;}
     .topbar{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 0 16px;}
     .brand{display:flex; flex-direction:column; gap:2px}
-    .brand .name{font-weight:800; letter-spacing:.2px}
+    .brand .name{font-weight:700; letter-spacing:.2px}
     .brand .sub{font-size:13px; color:var(--muted)}
     .actions{display:flex; align-items:center; gap:10px; flex-wrap:wrap;}
     .btn, .btn2{
@@ -1286,7 +1286,7 @@ REPORT_HTML_TEMPLATE = """
       border:1px solid var(--line);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
-      padding:16px;
+      padding:18px;
     }
     .hero{
       display:grid;
