@@ -27,7 +27,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -181,12 +181,18 @@ class PatientFlowScores(BaseModel):
     tech_basics: conint(ge=0, le=10)
 
 
+class QuickWinItem(BaseModel):
+    action: str = Field(..., description="The action text describing what to do")
+    impact: Literal["High", "Med", "Low"] = Field(..., description="Impact level: High, Med, or Low")
+    effort: Literal["Low", "Med", "High"] = Field(..., description="Effort level: Low, Med, or High")
+
+
 class PatientFlowAIOutput(BaseModel):
     clinic_name: str = Field(..., description="Clinic name inferred from the site")
     scores: PatientFlowScores
     strengths: List[str] = Field(default_factory=list)
     leaks: List[str] = Field(default_factory=list)
-    quick_wins: List[str] = Field(default_factory=list)
+    quick_wins: List[QuickWinItem] = Field(default_factory=list)
 
 
 def _model_to_dict(m: Any) -> Dict[str, Any]:
@@ -769,7 +775,15 @@ Scoring rules:
 - Each category score must be an integer 0–10.
 - Use calibration examples to avoid score inflation: 8+ should be rare unless it truly matches the GOLD example vibe.
 - Booking path is about how obvious + low-click the "Book/Consult" path is. If the form itself is long, keep booking_path high if the path is still obvious; list form friction under leaks/quick_wins.
-- Write strengths/leaks/quick_wins as short, plain bullets (no essays). Be specific.
+- Write strengths/leaks as short, plain bullets (no essays). Be specific.
+
+Quick Wins rules:
+- Each quick win must be a structured object with:
+  * action: Clear, actionable text (e.g., "Add a prominent 'Book Now' button above the fold")
+  * impact: High, Med, or Low (how much it will improve patient flow)
+  * effort: Low, Med, or High (how much work is required)
+- Prioritize quick wins by high impact and low effort
+- Be specific and actionable
 
 Return output that fits the required JSON schema.
 """.strip()
@@ -1553,6 +1567,90 @@ REPORT_HTML_TEMPLATE = """
     .itemEvidence:hover{
       background:rgba(122,162,255,.18);
     }
+    
+    /* Quick Win Checklist Styles */
+    .quickWinCheckbox{
+      flex-shrink:0;
+      width:18px;
+      height:18px;
+      border:2px solid rgba(255,255,255,.30);
+      border-radius:4px;
+      background:rgba(0,0,0,.2);
+      cursor:pointer;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      transition:all 0.2s;
+      margin-top:2px;
+    }
+    .quickWinCheckbox:hover{
+      border-color:rgba(122,162,255,.60);
+      background:rgba(122,162,255,.10);
+    }
+    .quickWinCheckbox.checked{
+      background:linear-gradient(135deg, rgba(122,162,255,.45), rgba(124,247,195,.30));
+      border-color:rgba(122,162,255,.85);
+      border-width:2.5px;
+    }
+    .quickWinCheckbox.checked::after{
+      content:'✓';
+      color:var(--text);
+      font-size:13px;
+      font-weight:900;
+    }
+    .quickWinAction{
+      flex:1;
+      color:rgba(232,238,252,.88);
+      font-size:14px;
+      line-height:1.4;
+    }
+    .quickWinChips{
+      display:flex;
+      gap:6px;
+      margin-top:6px;
+      flex-wrap:wrap;
+    }
+    .chip{
+      display:inline-flex;
+      align-items:center;
+      padding:4px 10px;
+      border-radius:999px;
+      font-size:11px;
+      font-weight:700;
+      letter-spacing:.3px;
+      text-transform:uppercase;
+      border:1px solid;
+    }
+    .chipImpactHigh{
+      background:rgba(255,100,100,.18);
+      color:rgba(255,180,180,.95);
+      border-color:rgba(255,100,100,.35);
+    }
+    .chipImpactMed{
+      background:rgba(255,200,100,.15);
+      color:rgba(255,220,140,.95);
+      border-color:rgba(255,200,100,.30);
+    }
+    .chipImpactLow{
+      background:rgba(200,200,200,.12);
+      color:rgba(220,220,220,.85);
+      border-color:rgba(200,200,200,.25);
+    }
+    .chipEffortLow{
+      background:rgba(124,247,195,.15);
+      color:rgba(150,255,210,.95);
+      border-color:rgba(124,247,195,.30);
+    }
+    .chipEffortMed{
+      background:rgba(122,162,255,.15);
+      color:rgba(160,190,255,.95);
+      border-color:rgba(122,162,255,.30);
+    }
+    .chipEffortHigh{
+      background:rgba(255,140,100,.15);
+      color:rgba(255,180,150,.95);
+      border-color:rgba(255,140,100,.30);
+    }
     .err{
       background: rgba(255, 70, 70, .10);
       border: 1px solid rgba(255, 70, 70, .20);
@@ -1727,6 +1825,17 @@ function isValidUrl(u) {
   return s.startsWith("/artifacts/") || s.startsWith("http://") || s.startsWith("https://") || s.startsWith("data:");
 }
 
+// Quick wins sorting constants
+const IMPACT_ORDER = { 'High': 3, 'Med': 2, 'Low': 1 };
+const EFFORT_ORDER = { 'Low': 3, 'Med': 2, 'High': 1 };
+
+// Normalize impact/effort values to handle case variations
+function normalizeValue(value, defaultValue, validValues) {
+  if (!value) return defaultValue;
+  const normalized = value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
+  return validValues.includes(normalized) ? normalized : defaultValue;
+}
+
 function setList(id, items) {
   const el = document.getElementById(id);
   const arr = Array.isArray(items) ? items : [];
@@ -1740,7 +1849,72 @@ function setList(id, items) {
     return;
   }
   
-  // Icon mappings for different sections
+  // Special handling for quick wins with checkboxes and chips
+  if (id === 'quickWins') {
+    const sortedItems = [...arr].sort((a, b) => {
+      // Handle both old string format and new object format
+      if (typeof a === 'string' || typeof b === 'string') return 0;
+      
+      // Use 1 (lowest priority) as fallback for invalid values
+      const impactDiff = (IMPACT_ORDER[a.impact] || 1) - (IMPACT_ORDER[b.impact] || 1);
+      if (impactDiff !== 0) return -impactDiff; // High impact first
+      
+      const effortDiff = (EFFORT_ORDER[a.effort] || 1) - (EFFORT_ORDER[b.effort] || 1);
+      return -effortDiff; // Low effort first
+    });
+    
+    el.innerHTML = sortedItems.slice(0, 12).map((item, idx) => {
+      if (typeof item === 'string') {
+        // Legacy format: plain string (fallback)
+        return `<li>
+          <div class="itemIcon">⚡</div>
+          <div class="itemContent">
+            <div class="itemWhy">${esc(item)}</div>
+          </div>
+        </li>`;
+      } else if (item && typeof item === 'object' && item.action) {
+        // New structured format with checkbox and chips
+        // Normalize values to handle case variations and ensure valid CSS classes
+        const impact = normalizeValue(item.impact, 'Med', ['High', 'Med', 'Low']);
+        const effort = normalizeValue(item.effort, 'Med', ['Low', 'Med', 'High']);
+        
+        const impactClass = `chipImpact${impact}`;
+        const effortClass = `chipEffort${effort}`;
+        
+        return `<li>
+          <div class="quickWinCheckbox" data-index="${idx}" role="checkbox" aria-checked="false" aria-label="Mark ${esc(item.action)} as complete" tabindex="0"></div>
+          <div class="itemContent">
+            <div class="quickWinAction">${esc(item.action)}</div>
+            <div class="quickWinChips">
+              <span class="chip ${impactClass}">Impact: ${esc(impact)}</span>
+              <span class="chip ${effortClass}">Effort: ${esc(effort)}</span>
+            </div>
+          </div>
+        </li>`;
+      }
+      return '';
+    }).join("");
+    
+    // Add click event listeners to checkboxes
+    el.querySelectorAll('.quickWinCheckbox').forEach(checkbox => {
+      const toggleCheck = () => {
+        const isChecked = checkbox.classList.toggle('checked');
+        checkbox.setAttribute('aria-checked', isChecked.toString());
+      };
+      
+      checkbox.addEventListener('click', toggleCheck);
+      checkbox.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          toggleCheck();
+        }
+      });
+    });
+    
+    return;
+  }
+  
+  // Icon mappings for other sections (strengths, leaks)
   const icons = {
     'strengths': '✓',
     'leaks': '⚠',
