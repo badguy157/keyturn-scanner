@@ -1780,18 +1780,16 @@ function setList(id, items) {
     return '';
   }).join("");
   
-  // Add event listeners for evidence links (using event delegation)
-  setTimeout(() => {
-    el.querySelectorAll('.itemEvidence').forEach(link => {
-      link.addEventListener('click', (e) => {
-        e.preventDefault();
-        const anchor = link.getAttribute('data-anchor');
-        if (anchor) {
-          scrollToScreenshot(anchor);
-        }
-      });
+  // Add event listeners for evidence links (using event delegation after DOM update)
+  el.querySelectorAll('.itemEvidence').forEach(link => {
+    link.addEventListener('click', (e) => {
+      e.preventDefault();
+      const anchor = link.getAttribute('data-anchor');
+      if (anchor) {
+        scrollToScreenshot(anchor);
+      }
     });
-  }, 0);
+  });
 }
 
 function renderBars(scores) {
