@@ -1314,7 +1314,18 @@ REPORT_HTML_TEMPLATE = """
     @media (max-width: 480px){ .scoreboardTop{flex-direction:column; gap:12px;}}
     .scoreboardPrimary{display:flex; flex-direction:column; gap:4px; position:relative; align-items:center;}
     .scoreRingWrap{position:relative; width:180px; height:180px; display:flex; align-items:center; justify-content:center;}
-    .scoreRing{position:absolute; inset:0; border-radius:50%; background:conic-gradient(from -90deg, rgba(122,162,255,.75) 0%, rgba(122,162,255,.75) var(--progress, 0%), rgba(255,255,255,.08) var(--progress, 0%), rgba(255,255,255,.08) 100%); mask:radial-gradient(circle, transparent 0%, transparent 62%, black 62%, black 100%); -webkit-mask:radial-gradient(circle, transparent 0%, transparent 62%, black 62%, black 100%);}
+    .scoreRing{
+      position:absolute; inset:0; border-radius:50%;
+      background:conic-gradient(
+        from -90deg,
+        rgba(122,162,255,.75) 0%,
+        rgba(122,162,255,.75) var(--progress, 0%),
+        rgba(255,255,255,.08) var(--progress, 0%),
+        rgba(255,255,255,.08) 100%
+      );
+      mask:radial-gradient(circle, transparent 0%, transparent 62%, black 62%, black 100%);
+      -webkit-mask:radial-gradient(circle, transparent 0%, transparent 62%, black 62%, black 100%);
+    }
     .scoreRingInner{position:relative; z-index:1; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;}
     .scoreLarge{font-size:52px; font-weight:900; letter-spacing:-.9px; line-height:1.2;}
     .scoreLabel{font-size:13px; color:var(--muted); margin-top:4px;}
@@ -1686,6 +1697,7 @@ async function tick() {
     document.getElementById("band").textContent = score.band || "—";
     
     // Update ScoreboardCard
+    const MAX_SCORE = 60;
     const total60 = score.total_score_60 ?? 0;
     const score10 = score.patient_flow_score_10 ?? 0;
     
@@ -1696,7 +1708,7 @@ async function tick() {
     // Update the radial progress ring
     const ringEl = document.getElementById("scoreRing");
     if (ringEl && total60 > 0) {
-      const progressPct = (total60 / 60) * 100;
+      const progressPct = (total60 / MAX_SCORE) * 100;
       ringEl.style.setProperty('--progress', progressPct + '%');
     }
 
