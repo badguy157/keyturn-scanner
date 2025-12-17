@@ -1267,7 +1267,7 @@ REPORT_HTML_TEMPLATE = """
       min-height:100vh;
     }
     a{color:inherit; text-decoration:none}
-    .wrap{max-width:1120px; margin:0 auto; padding:22px 18px 64px;}
+    .wrap{max-width:1050px; margin:0 auto; padding:22px 18px 64px;}
     .topbar{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 0 16px;}
     .brand{display:flex; flex-direction:column; gap:2px}
     .brand .name{font-weight:700; letter-spacing:.2px}
@@ -1291,14 +1291,17 @@ REPORT_HTML_TEMPLATE = """
       box-shadow: var(--shadow);
       padding:18px;
     }
-    .hero{
-      display:grid;
-      grid-template-columns: 1fr;
+    .headerRow{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
       gap:14px;
-      align-items:stretch;
+      margin-bottom:14px;
+      flex-wrap:wrap;
     }
+    .headerLeft{display:flex; flex-direction:column; gap:8px; flex:1; min-width:0;}
     .h1{margin:0; font-size:28px; letter-spacing:-.35px}
-    .meta{margin-top:8px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; color:var(--muted); font-size:13px}
+    .meta{display:flex; gap:10px; flex-wrap:wrap; align-items:center; color:var(--muted); font-size:13px}
     .pill{
       display:inline-flex; align-items:center; gap:8px;
       padding:6px 10px; border-radius:999px;
@@ -1306,7 +1309,17 @@ REPORT_HTML_TEMPLATE = """
       background: rgba(0,0,0,.18);
       color: rgba(232,238,252,.88);
     }
-    .status{margin-top:10px; color:var(--muted); font-size:13px}
+    .status{margin-top:8px; color:var(--muted); font-size:13px}
+    .summaryRow{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:14px;
+      margin-bottom:14px;
+    }
+    @media (max-width: 980px){ .summaryRow{grid-template-columns:1fr;}}
+    .screenshotsCard{
+      display:flex; flex-direction:column;
+    }
     .scoreboardCard{
       display:flex; flex-direction:column;
       padding:18px; border-radius: var(--radius);
@@ -1351,7 +1364,7 @@ REPORT_HTML_TEMPLATE = """
     .miniScore{font-size:11px; color:rgba(232,238,252,.88); font-weight:700;}
     .grid{
       display:grid;
-      grid-template-columns: 1fr 1fr 1fr 1fr;
+      grid-template-columns: 1fr 1fr 1fr;
       gap:14px;
       margin-top:14px;
     }
@@ -1432,8 +1445,8 @@ REPORT_HTML_TEMPLATE = """
       </div>
     </div>
 
-    <div class="hero">
-      <div class="panel">
+    <div class="panel headerRow">
+      <div class="headerLeft">
         <div class="h1" id="clinicName">Patient-Flow Report</div>
         <div class="meta">
           <a id="siteUrl" href="#" target="_blank" rel="noopener" class="pill">Website</a>
@@ -1441,13 +1454,10 @@ REPORT_HTML_TEMPLATE = """
           <span class="pill">Mode: __MODE__</span>
         </div>
         <div class="status" id="status">Loading...</div>
-
-        <div class="shots" id="imgs"></div>
-        <div id="errs"></div>
       </div>
     </div>
 
-    <div class="grid">
+    <div class="summaryRow">
       <div class="panel scoreboardCard">
         <div class="scoreboardTop">
           <div class="scoreboardPrimary">
@@ -1467,6 +1477,14 @@ REPORT_HTML_TEMPLATE = """
         </div>
         <div class="miniBars" id="miniScoreBars"></div>
       </div>
+      <div class="panel screenshotsCard">
+        <h2>Screenshots</h2>
+        <div class="shots" id="imgs"></div>
+        <div id="errs"></div>
+      </div>
+    </div>
+
+    <div class="grid">
       <div class="panel">
         <h2>Scores</h2>
         <div class="bars" id="scoreBars"></div>
