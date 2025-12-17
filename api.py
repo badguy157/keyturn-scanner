@@ -1303,15 +1303,6 @@ REPORT_HTML_TEMPLATE = """
       background: rgba(0,0,0,.18);
       color: rgba(232,238,252,.88);
     }
-    .scoreBox{
-      display:flex; flex-direction:column; justify-content:center; align-items:flex-start;
-      padding:16px; border-radius: var(--radius);
-      border:1px solid rgba(255,255,255,.12);
-      background: linear-gradient(135deg, rgba(122,162,255,.16), rgba(124,247,195,.10));
-      min-height:120px;
-    }
-    .scoreNum{font-size:44px; font-weight:900; letter-spacing:-.8px; line-height:1}
-    .scoreSub{margin-top:8px; color:var(--muted); font-size:13px}
     .status{margin-top:10px; color:var(--muted); font-size:13px}
     .scoreboardCard{
       display:flex; flex-direction:column;
