@@ -1731,7 +1731,12 @@ function setList(id, items) {
   const el = document.getElementById(id);
   const arr = Array.isArray(items) ? items : [];
   if (!arr.length) {
-    el.innerHTML = '<li><div class="itemIcon">—</div><div class="itemContent"><div class="itemWhy">None listed.</div></div></li>';
+    el.innerHTML = `<li>
+      <div class="itemIcon">—</div>
+      <div class="itemContent">
+        <div class="itemWhy">None listed.</div>
+      </div>
+    </li>`;
     return;
   }
   
@@ -1758,7 +1763,7 @@ function setList(id, items) {
       const title = item.title ? `<div class="itemTitle">${esc(item.title)}</div>` : '';
       const why = item.why ? `<div class="itemWhy">${esc(item.why)}</div>` : '';
       const evidence = item.evidence ? 
-        `<a href="#${esc(item.evidence)}" class="itemEvidence" onclick="scrollToScreenshot('${esc(item.evidence)}'); return false;">
+        `<a href="#${esc(item.evidence)}" class="itemEvidence" data-anchor="${esc(item.evidence)}">
           <span>📸</span>
           <span>View evidence</span>
         </a>` : '';
@@ -1774,6 +1779,19 @@ function setList(id, items) {
     }
     return '';
   }).join("");
+  
+  // Add event listeners for evidence links (using event delegation)
+  setTimeout(() => {
+    el.querySelectorAll('.itemEvidence').forEach(link => {
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        const anchor = link.getAttribute('data-anchor');
+        if (anchor) {
+          scrollToScreenshot(anchor);
+        }
+      });
+    });
+  }, 0);
 }
 
 function renderBars(scores) {
