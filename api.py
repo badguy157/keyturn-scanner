@@ -1312,7 +1312,10 @@ REPORT_HTML_TEMPLATE = """
     }
     .scoreboardTop{display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:14px;}
     @media (max-width: 480px){ .scoreboardTop{flex-direction:column; gap:12px;}}
-    .scoreboardPrimary{display:flex; flex-direction:column; gap:4px;}
+    .scoreboardPrimary{display:flex; flex-direction:column; gap:4px; position:relative; align-items:center;}
+    .scoreRingWrap{position:relative; width:180px; height:180px; display:flex; align-items:center; justify-content:center;}
+    .scoreRing{position:absolute; inset:0; border-radius:50%; background:conic-gradient(from -90deg, rgba(122,162,255,.75) 0%, rgba(122,162,255,.75) var(--progress, 0%), rgba(255,255,255,.08) var(--progress, 0%), rgba(255,255,255,.08) 100%); mask:radial-gradient(circle, transparent 0%, transparent 62%, black 62%, black 100%); -webkit-mask:radial-gradient(circle, transparent 0%, transparent 62%, black 62%, black 100%);}
+    .scoreRingInner{position:relative; z-index:1; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;}
     .scoreLarge{font-size:52px; font-weight:900; letter-spacing:-.9px; line-height:1.2;}
     .scoreLabel{font-size:13px; color:var(--muted); margin-top:4px;}
     .scoreSecondary{display:flex; flex-direction:column; align-items:flex-end; gap:4px;}
@@ -1434,8 +1437,13 @@ REPORT_HTML_TEMPLATE = """
       <div class="panel scoreboardCard">
         <div class="scoreboardTop">
           <div class="scoreboardPrimary">
-            <div class="scoreLarge" id="score60Main">--</div>
-            <div class="scoreLabel">out of 60</div>
+            <div class="scoreRingWrap">
+              <div class="scoreRing" id="scoreRing"></div>
+              <div class="scoreRingInner">
+                <div class="scoreLarge" id="score60Main">--</div>
+                <div class="scoreLabel">out of 60</div>
+              </div>
+            </div>
           </div>
           <div class="scoreSecondary">
             <div class="scoreMedium" id="score10Main">--</div>
@@ -1678,9 +1686,19 @@ async function tick() {
     document.getElementById("band").textContent = score.band || "—";
     
     // Update ScoreboardCard
-    document.getElementById("score10Main").textContent = (score.patient_flow_score_10 ?? "--");
-    document.getElementById("score60Main").textContent = (score.total_score_60 ?? "--");
+    const total60 = score.total_score_60 ?? 0;
+    const score10 = score.patient_flow_score_10 ?? 0;
+    
+    document.getElementById("score10Main").textContent = (score10 === 0 ? "--" : score10);
+    document.getElementById("score60Main").textContent = (total60 === 0 ? "--" : total60);
     document.getElementById("verdictChip").textContent = score.band || "—";
+    
+    // Update the radial progress ring
+    const ringEl = document.getElementById("scoreRing");
+    if (ringEl && total60 > 0) {
+      const progressPct = (total60 / 60) * 100;
+      ringEl.style.setProperty('--progress', progressPct + '%');
+    }
 
     renderBars(score.scores || {});
     renderMiniBars(score.scores || {});
