@@ -1439,6 +1439,65 @@ REPORT_HTML_TEMPLATE = """
     .barTop{display:flex; justify-content:space-between; gap:10px; font-size:13px; color:rgba(232,238,252,.88)}
     .track{height:10px; border-radius:999px; background:rgba(255,255,255,.10); overflow:hidden; border:1px solid rgba(255,255,255,.10)}
     .fill{height:100%; width:0%; border-radius:999px; background:linear-gradient(90deg, rgba(122,162,255,.85), rgba(124,247,195,.75));}
+    
+    /* Score cards grid */
+    .scoreCards{
+      display:grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap:12px;
+    }
+    @media (max-width: 980px){ .scoreCards{grid-template-columns:1fr;}}
+    .scoreCard{
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+      padding:14px;
+      border-radius:16px;
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(255,255,255,.04);
+    }
+    .scoreCardTop{
+      display:flex;
+      justify-content:space-between;
+      align-items:flex-start;
+      gap:8px;
+    }
+    .scoreCardLabel{
+      font-size:12px;
+      font-weight:600;
+      letter-spacing:.2px;
+      color:rgba(232,238,252,.92);
+      line-height:1.3;
+    }
+    .scoreCardValue{
+      font-size:18px;
+      font-weight:900;
+      letter-spacing:-.3px;
+      color:var(--text);
+      flex-shrink:0;
+    }
+    .scoreCardHelper{
+      font-size:11px;
+      color:var(--muted);
+      line-height:1.3;
+      margin-top:-2px;
+    }
+    .scoreCardTrack{
+      height:6px;
+      border-radius:999px;
+      background:rgba(255,255,255,.10);
+      overflow:hidden;
+      border:1px solid rgba(255,255,255,.10);
+      position:relative;
+    }
+    .scoreCardFill{
+      position:absolute;
+      left:0;
+      top:0;
+      height:100%;
+      border-radius:999px;
+      background:linear-gradient(90deg, rgba(122,162,255,.85), rgba(124,247,195,.75));
+    }
     ul{margin:0; padding-left:18px; color:rgba(232,238,252,.84)}
     li{margin:8px 0; line-height:1.35}
     .err{
@@ -1546,11 +1605,12 @@ REPORT_HTML_TEMPLATE = """
       </div>
     </div>
 
+    <div class="panel">
+      <h2>Scores</h2>
+      <div class="scoreCards" id="scoreBars"></div>
+    </div>
+
     <div class="grid">
-      <div class="panel">
-        <h2>Scores</h2>
-        <div class="bars" id="scoreBars"></div>
-      </div>
       <div class="panel">
         <h2>Strengths</h2>
         <ul id="strengths"><li>Waiting for score...</li></ul>
@@ -1559,14 +1619,12 @@ REPORT_HTML_TEMPLATE = """
         <h2>Leaks</h2>
         <ul id="leaks"><li>Waiting for score...</li></ul>
       </div>
-    </div>
-
-    <div class="grid">
-      <div class="panel" style="grid-column: 1 / -1;">
+      <div class="panel">
         <h2>Quick wins</h2>
         <ul id="quickWins"><li>Waiting for score...</li></ul>
       </div>
     </div>
+
 
     <div id="rawWrap">
       <details>
@@ -1630,23 +1688,27 @@ function renderBars(scores) {
   const wrap = document.getElementById("scoreBars");
   wrap.innerHTML = "";
   const order = [
-    ["clarity_first_impression","Clarity & first impression"],
-    ["booking_path","Booking path"],
-    ["mobile_experience","Mobile experience"],
-    ["trust_and_proof","Trust & proof"],
-    ["treatments_and_offer","Treatments & offer"],
-    ["tech_basics","Tech basics"],
+    ["clarity_first_impression","Clarity & first impression", "Is it obvious what you do?"],
+    ["booking_path","Booking path", "How easy to book/consult?"],
+    ["mobile_experience","Mobile experience", "Usable on phone?"],
+    ["trust_and_proof","Trust & proof", "Credentials & reviews visible?"],
+    ["treatments_and_offer","Treatments & offer", "Clear services & outcomes?"],
+    ["tech_basics","Tech basics", "Fast, modern, functional?"],
   ];
-  for (const [k, label] of order) {
+  for (const [k, label, helper] of order) {
     const v = Number((scores||{})[k] ?? 0);
     const pct = Math.max(0, Math.min(100, (v/10)*100));
-    const row = document.createElement("div");
-    row.className = "barRow";
-    row.innerHTML = `
-      <div class="barTop"><span>${esc(label)}</span><span>${v}/10</span></div>
-      <div class="track"><div class="fill" style="width:${pct}%"></div></div>
+    const card = document.createElement("div");
+    card.className = "scoreCard";
+    card.innerHTML = `
+      <div class="scoreCardTop">
+        <div class="scoreCardLabel">${esc(label)}</div>
+        <div class="scoreCardValue">${v}/10</div>
+      </div>
+      <div class="scoreCardHelper">${esc(helper)}</div>
+      <div class="scoreCardTrack"><div class="scoreCardFill" style="width:${pct}%"></div></div>
     `;
-    wrap.appendChild(row);
+    wrap.appendChild(card);
   }
 }
 
