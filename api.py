@@ -1620,9 +1620,6 @@ REPORT_HTML_TEMPLATE = """
       text-transform:uppercase;
       border:1px solid;
     }
-    .chipImpact{
-      border-color:rgba(255,255,255,.18);
-    }
     .chipImpactHigh{
       background:rgba(255,100,100,.18);
       color:rgba(255,180,180,.95);
@@ -1637,9 +1634,6 @@ REPORT_HTML_TEMPLATE = """
       background:rgba(200,200,200,.12);
       color:rgba(220,220,220,.85);
       border-color:rgba(200,200,200,.25);
-    }
-    .chipEffort{
-      border-color:rgba(255,255,255,.18);
     }
     .chipEffortLow{
       background:rgba(124,247,195,.15);
@@ -1887,12 +1881,12 @@ function setList(id, items) {
         const effortClass = `chipEffort${effort}`;
         
         return `<li>
-          <div class="quickWinCheckbox" data-index="${idx}" role="checkbox" aria-checked="false" tabindex="0"></div>
+          <div class="quickWinCheckbox" data-index="${idx}" role="checkbox" aria-checked="false" aria-label="Mark ${esc(item.action)} as complete" tabindex="0"></div>
           <div class="itemContent">
             <div class="quickWinAction">${esc(item.action)}</div>
             <div class="quickWinChips">
-              <span class="chip chipImpact ${impactClass}">Impact: ${esc(impact)}</span>
-              <span class="chip chipEffort ${effortClass}">Effort: ${esc(effort)}</span>
+              <span class="chip ${impactClass}">Impact: ${esc(impact)}</span>
+              <span class="chip ${effortClass}">Effort: ${esc(effort)}</span>
             </div>
           </div>
         </li>`;
