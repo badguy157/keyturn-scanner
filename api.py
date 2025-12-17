@@ -1311,11 +1311,12 @@ REPORT_HTML_TEMPLATE = """
       background: linear-gradient(135deg, rgba(122,162,255,.16), rgba(124,247,195,.10));
     }
     .scoreboardTop{display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:14px;}
+    @media (max-width: 480px){ .scoreboardTop{flex-direction:column; gap:12px;}}
     .scoreboardPrimary{display:flex; flex-direction:column; gap:4px;}
-    .scoreLarge{font-size:52px; font-weight:900; letter-spacing:-.9px; line-height:1;}
+    .scoreLarge{font-size:52px; font-weight:900; letter-spacing:-.9px; line-height:1.2;}
     .scoreLabel{font-size:13px; color:var(--muted); margin-top:4px;}
     .scoreSecondary{display:flex; flex-direction:column; align-items:flex-end; gap:4px;}
-    .scoreMedium{font-size:32px; font-weight:900; letter-spacing:-.6px; line-height:1;}
+    .scoreMedium{font-size:32px; font-weight:900; letter-spacing:-.6px; line-height:1.2;}
     .verdictChip{
       padding:6px 12px; border-radius:999px;
       border:1px solid rgba(255,255,255,.18);
