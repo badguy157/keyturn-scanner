@@ -23,6 +23,8 @@
 #   python -m uvicorn api:app --reload
 
 import base64
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -229,30 +231,6 @@ def _ensure_columns() -> None:
         conn.close()
 
 
-def _populate_deep_scan_codes() -> None:
-    """Populate deep_scan_codes table from DEEP_SCAN_CODES environment variable."""
-    if not DEEP_SCAN_CODES:
-        return
-    
-    codes = [code.strip() for code in DEEP_SCAN_CODES.split(",") if code.strip()]
-    if not codes:
-        return
-    
-    conn = db()
-    try:
-        # Get existing codes from database
-        existing_codes = {row["code"] for row in conn.execute("SELECT code FROM deep_scan_codes").fetchall()}
-        
-        # Insert new codes that don't exist yet
-        for code in codes:
-            if code not in existing_codes:
-                conn.execute("INSERT INTO deep_scan_codes (code, used_at, used_for_domain) VALUES (?, NULL, NULL)", (code,))
-        
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def init_db() -> None:
     conn = db()
     conn.execute(
@@ -316,27 +294,15 @@ def init_db() -> None:
     )
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS deep_scan_codes (
-          code TEXT PRIMARY KEY,
-          used_at TEXT,
-          used_for_domain TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS deep_scan_tokens (
+        CREATE TABLE IF NOT EXISTS deep_tokens (
           token TEXT PRIMARY KEY,
-          domain TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          used_at TEXT
+          expires_at TEXT NOT NULL
         )
         """
     )
     conn.commit()
     conn.close()
     _ensure_columns()
-    _populate_deep_scan_codes()
 
 
 init_db()
@@ -352,7 +318,6 @@ class ScanRequest(BaseModel):
 
 class DeepUnlockRequest(BaseModel):
     code: str
-    domain: str
 
 
 class EventRequest(BaseModel):
@@ -401,6 +366,11 @@ def _model_to_dict(m: Any) -> Dict[str, Any]:
 
 def now_iso() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+def constant_time_compare(a: str, b: str) -> bool:
+    """Constant-time string comparison to prevent timing attacks."""
+    return hmac.compare_digest(a.encode('utf-8'), b.encode('utf-8'))
 
 
 def slugify(name: str) -> str:
@@ -2128,16 +2098,8 @@ async function unlockDeep(event) {
   event.stopPropagation();
   
   const codeInput = document.getElementById('deepCode');
-  const urlInput = document.getElementById('url');
   const hint = document.getElementById('deepUnlockHint');
   const code = codeInput.value.trim();
-  const url = urlInput.value.trim();
-  
-  if (!url) {
-    hint.textContent = 'Please enter a website URL first';
-    hint.style.color = 'rgba(255, 200, 200, .95)';
-    return;
-  }
   
   if (!code) {
     hint.textContent = 'Please enter an unlock code';
@@ -2149,19 +2111,10 @@ async function unlockDeep(event) {
   hint.style.color = 'var(--muted)';
   
   try {
-    // Extract domain from URL
-    let domain = url;
-    try {
-      const urlObj = new URL(url.startsWith('http') ? url : 'https://' + url);
-      domain = urlObj.hostname;
-    } catch (e) {
-      // If URL parsing fails, use the raw value
-    }
-    
-    const res = await fetch('/api/deep/unlock', {
+    const res = await fetch('/api/unlock-deep', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code, domain })
+      body: JSON.stringify({ code })
     });
     
     if (!res.ok) {
@@ -2172,7 +2125,7 @@ async function unlockDeep(event) {
     }
     
     const data = await res.json();
-    deepToken = data.deep_token;
+    deepToken = data.token;
     
     // Hide unlock UI, show unlocked message
     document.getElementById('deepUnlock').classList.remove('visible');
@@ -2281,77 +2234,54 @@ def health():
     }
 
 
-@app.post("/api/deep/unlock")
+@app.post("/api/unlock-deep")
 def unlock_deep_scan(req: DeepUnlockRequest):
     """Unlock deep scan by validating an unlock code.
     
-    Returns a deep_token that can be used for one deep scan of the specified domain.
+    Returns a token that expires after 24 hours.
     """
     code = req.code.strip()
-    domain = req.domain.strip().lower()
     
     if not code:
         raise HTTPException(status_code=422, detail="Code is required")
     
-    if not domain:
-        raise HTTPException(status_code=422, detail="Domain is required")
+    # Get all codes from environment and compare using constant-time
+    if not DEEP_SCAN_CODES:
+        raise HTTPException(status_code=404, detail="Invalid code")
     
-    # Normalize domain (remove www. prefix, protocol, path, etc.)
-    try:
-        # If domain doesn't have a protocol, add one for parsing
-        if not domain.startswith(('http://', 'https://')):
-            domain_to_parse = f"https://{domain}"
-        else:
-            domain_to_parse = domain
-        
-        parsed = urlparse(domain_to_parse)
-        normalized_domain = parsed.netloc.replace("www.", "").lower()
-        
-        if not normalized_domain:
-            raise HTTPException(status_code=422, detail="Invalid domain")
-    except HTTPException:
-        raise
-    except (ValueError, AttributeError) as e:
-        raise HTTPException(status_code=422, detail="Invalid domain format")
+    codes = [c.strip() for c in DEEP_SCAN_CODES.split(",") if c.strip()]
     
-    # Check if code exists and is unused
+    # Use constant-time comparison to prevent timing attacks
+    # Note: We must compare against ALL codes to maintain constant time
+    code_valid = False
+    for valid_code in codes:
+        if constant_time_compare(code, valid_code):
+            code_valid = True
+        # Don't break - continue checking all codes to maintain constant time
+    
+    if not code_valid:
+        raise HTTPException(status_code=404, detail="Invalid code")
+    
+    # Generate a token with 24h expiration
+    token = uuid.uuid4().hex
+    expires_at = (datetime.utcnow() + timedelta(hours=24)).isoformat(timespec="seconds") + "Z"
+    
+    # Store token in database
     conn = db()
     try:
-        row = conn.execute("SELECT * FROM deep_scan_codes WHERE code=?", (code,)).fetchone()
-        
-        if not row:
-            raise HTTPException(status_code=404, detail="Invalid unlock code")
-        
-        # Mark code as used atomically (prevents race condition)
-        # Using UPDATE with WHERE clause that checks used_at IS NULL ensures only one request succeeds
-        cursor = conn.execute(
-            "UPDATE deep_scan_codes SET used_at=?, used_for_domain=? WHERE code=? AND used_at IS NULL",
-            (now_iso(), normalized_domain, code)
-        )
-        
-        if cursor.rowcount == 0:
-            # Code was already used by another concurrent request
-            raise HTTPException(status_code=409, detail="This code has already been used")
-        
-        conn.commit()
-        
-        # Generate a deep_token (one-time token for this domain)
-        deep_token = uuid.uuid4().hex
-        
-        # Store token in database
         conn.execute(
-            "INSERT INTO deep_scan_tokens (token, domain, created_at, used_at) VALUES (?, ?, ?, NULL)",
-            (deep_token, normalized_domain, now_iso())
+            "INSERT INTO deep_tokens (token, expires_at) VALUES (?, ?)",
+            (token, expires_at)
         )
         conn.commit()
-        
-        return {
-            "ok": True,
-            "deep_token": deep_token,
-            "domain": normalized_domain,
-        }
     finally:
         conn.close()
+    
+    return {
+        "ok": True,
+        "token": token,
+        "expires_at": expires_at
+    }
 
 
 @app.post("/api/scan")
@@ -2374,45 +2304,33 @@ def create_scan(req: ScanRequest):
     # Deep scan gating: require deep_token for deep mode
     if mode == "deep":
         if not deep_token:
-            raise HTTPException(status_code=403, detail="Deep scan requires an unlock code. Please unlock deep scan first.")
+            raise HTTPException(status_code=402, detail=json.dumps({"error": "DEEP_SCAN_LOCKED"}))
         
         # Validate deep_token against database
         conn = db()
         try:
-            # Normalize the domain from the URL
-            try:
-                url_str = str(req.url)
-                parsed = urlparse(url_str if url_str.startswith(('http://', 'https://')) else f"https://{url_str}")
-                normalized_domain = parsed.netloc.replace("www.", "").lower()
-            except Exception:
-                raise HTTPException(status_code=422, detail="Invalid URL format")
+            # Check if token exists and is not expired
+            token_row = conn.execute(
+                "SELECT * FROM deep_tokens WHERE token=?",
+                (deep_token,)
+            ).fetchone()
             
-            # Mark token as used atomically with validation (prevents race condition)
-            # Using UPDATE with WHERE clause ensures only one request succeeds
-            cursor = conn.execute(
-                "UPDATE deep_scan_tokens SET used_at=? WHERE token=? AND used_at IS NULL AND domain=?",
-                (now_iso(), deep_token, normalized_domain)
-            )
+            if not token_row:
+                raise HTTPException(status_code=402, detail=json.dumps({"error": "DEEP_SCAN_LOCKED"}))
             
-            if cursor.rowcount == 0:
-                # Token doesn't exist, already used, or wrong domain - need to determine which
-                token_row = conn.execute(
-                    "SELECT * FROM deep_scan_tokens WHERE token=?",
-                    (deep_token,)
-                ).fetchone()
-                
-                if not token_row:
-                    raise HTTPException(status_code=403, detail="Invalid deep scan token")
-                
-                if token_row["used_at"]:
-                    raise HTTPException(status_code=403, detail="This deep scan token has already been used")
-                
-                # Token exists and unused, so domain must be wrong
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"This token is for {token_row['domain']}, but you're trying to scan {normalized_domain}"
-                )
+            # Check if token has expired
+            # Parse the ISO format timestamp (handles both with and without 'Z')
+            expires_at_str = token_row["expires_at"]
+            if expires_at_str.endswith('Z'):
+                # Remove 'Z' for fromisoformat compatibility
+                expires_at_str = expires_at_str[:-1]
+            expires_at = datetime.fromisoformat(expires_at_str)
+            now = datetime.utcnow()
+            if now >= expires_at:
+                raise HTTPException(status_code=402, detail=json.dumps({"error": "DEEP_SCAN_LOCKED"}))
             
+            # Token is valid and not expired - delete it (one-time use)
+            conn.execute("DELETE FROM deep_tokens WHERE token=?", (deep_token,))
             conn.commit()
         finally:
             conn.close()
@@ -4440,23 +4358,10 @@ async function unlockDeepFromReport() {
   hint.style.color = 'var(--muted)';
   
   try {
-    // Get the current domain from the scan
-    const res = await fetch('/api/scan/' + scanId);
-    const data = await res.json();
-    const scanUrl = data.url || '';
-    
-    let domain = scanUrl;
-    try {
-      const urlObj = new URL(scanUrl.startsWith('http') ? scanUrl : 'https://' + scanUrl);
-      domain = urlObj.hostname;
-    } catch (e) {
-      // If URL parsing fails, use the raw value
-    }
-    
-    const unlockRes = await fetch('/api/deep/unlock', {
+    const unlockRes = await fetch('/api/unlock-deep', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code, domain })
+      body: JSON.stringify({ code })
     });
     
     if (!unlockRes.ok) {
@@ -4468,8 +4373,13 @@ async function unlockDeepFromReport() {
     
     const unlockData = await unlockRes.json();
     
+    // Get the current scan URL
+    const res = await fetch('/api/scan/' + scanId);
+    const data = await res.json();
+    const scanUrl = data.url || '';
+    
     // Redirect to home page with URL prefilled and deep mode unlocked
-    const deepToken = unlockData.deep_token;
+    const deepToken = unlockData.token;
     // Store in sessionStorage so the home page can use it
     sessionStorage.setItem('deepToken', deepToken);
     sessionStorage.setItem('prefillUrl', scanUrl);
