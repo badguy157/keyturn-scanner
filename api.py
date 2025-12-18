@@ -2895,11 +2895,26 @@ async function logEvent(eventType, metadata = {}) {
 logEvent('report_viewed');
 
 // Send report email function
+let lastEmailSent = 0;
+const EMAIL_COOLDOWN_MS = 15000; // 15 seconds cooldown
+
 async function sendReportEmail() {
   const emailInput = document.getElementById('emailInput');
   const btn = document.getElementById('sendEmailBtn');
   const hint = document.getElementById('emailHint');
   const email = emailInput.value.trim();
+  
+  // Check cooldown
+  const now = Date.now();
+  const timeSinceLastSend = now - lastEmailSent;
+  if (timeSinceLastSend < EMAIL_COOLDOWN_MS) {
+    const remainingSeconds = Math.ceil((EMAIL_COOLDOWN_MS - timeSinceLastSend) / 1000);
+    hint.textContent = `Please wait ${remainingSeconds} seconds before sending again`;
+    hint.style.color = 'rgba(255, 200, 200, .95)';
+    hint.classList.add('visible');
+    setTimeout(() => { hint.classList.remove('visible'); }, 3000);
+    return;
+  }
   
   if (!email) {
     hint.textContent = "Please enter your email address";
@@ -2931,7 +2946,8 @@ async function sendReportEmail() {
     }
     
     const data = await res.json();
-    hint.textContent = "✓ Report link sent to your inbox!";
+    lastEmailSent = Date.now(); // Update cooldown timestamp
+    hint.textContent = `✓ Sent to ${email}`;
     hint.style.color = 'rgba(124,247,195,.85)';
     hint.classList.add('visible');
     emailInput.value = '';
@@ -2943,7 +2959,25 @@ async function sendReportEmail() {
     }, 3000);
   } catch (error) {
     console.error('Failed to send email:', error);
-    hint.textContent = "Failed to send email. Please try again.";
+    
+    // Extract error message from the error object
+    let errorMsg = "Failed to send email. Please try again.";
+    if (error.message) {
+      try {
+        // Try to parse JSON error response
+        const errorData = JSON.parse(error.message);
+        if (errorData.detail) {
+          errorMsg = errorData.detail;
+        }
+      } catch (e) {
+        // If not JSON, use the error message as is
+        if (error.message.length < 100) {
+          errorMsg = error.message;
+        }
+      }
+    }
+    
+    hint.textContent = errorMsg;
     hint.style.color = 'rgba(255, 200, 200, .95)';
     hint.classList.add('visible');
     
@@ -2951,7 +2985,7 @@ async function sendReportEmail() {
       btn.textContent = originalText;
       btn.disabled = false;
       hint.classList.remove('visible');
-    }, 3000);
+    }, 5000);  // Show error for 5 seconds
   }
 }
 
