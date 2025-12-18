@@ -1779,12 +1779,85 @@ REPORT_HTML_TEMPLATE = """
     
     /* Print styles for PDF */
     @media print {
-      body{background:white; color:black;}
-      .topbar, .modal, #rawWrap{display:none !important;}
-      .btn, .btn2{display:none !important;}
-      .panel{border:1px solid #ddd; box-shadow:none; background:white; page-break-inside:avoid;}
-      .wrap{max-width:100%; padding:10px;}
-      .scoreRing{print-color-adjust:exact; -webkit-print-color-adjust:exact;}
+      /* Force white background and black text */
+      body{
+        background:white !important;
+        color:black !important;
+      }
+      
+      /* Hide all interactive UI elements */
+      .topbar, .modal, #rawWrap, .actions,
+      .btn, .btn2, .k-btn, .k-btn--primary,
+      button, .copyBtn, .modalClose, .modalNav,
+      .quickWinCheckbox{
+        display:none !important;
+      }
+      
+      /* Remove shadows and glass effects */
+      .panel, .scoreboardCard, .thumb, .scoreCard, li,
+      .pill, .verdictChip, .chip, .item, .err{
+        box-shadow:none !important;
+        background:white !important;
+        border:1px solid #ddd !important;
+      }
+      
+      /* Prevent page breaks inside cards and important sections */
+      .panel, .scoreboardCard, .scoreCard, .summaryRow,
+      .grid > div, li, .thumb, .barRow, .miniBarRow{
+        page-break-inside:avoid !important;
+        break-inside:avoid !important;
+      }
+      
+      /* Make all text fully readable - high contrast */
+      .wrap, .h1, .meta, .pill, .status,
+      .scoreLabel, .verdictChip, .miniBarLabel, .miniScore,
+      .barTop, .scoreCardLabel, .scoreCardValue, .scoreCardHelper,
+      .itemIcon, .itemContent, .itemTitle, .itemWhy, .itemEvidence,
+      .quickWinAction, .chip, .thumbLabel, .modalLabel,
+      .brand .name, .brand .sub, h2, ul, li,
+      .lead, .hint, .fine, .foot, label, .err{
+        color:black !important;
+        opacity:1 !important;
+      }
+      
+      /* Ensure color elements print correctly */
+      .scoreRing, .fill, .miniFill, .scoreCardFill, .dot{
+        print-color-adjust:exact !important;
+        -webkit-print-color-adjust:exact !important;
+        color-adjust:exact !important;
+      }
+      
+      /* Optimize layout for print */
+      .wrap{
+        max-width:100% !important;
+        padding:10px !important;
+      }
+      
+      /* Ensure images are visible */
+      .thumb img, .modalImg{
+        display:block !important;
+        max-width:100% !important;
+      }
+      
+      /* Make track backgrounds visible in print */
+      .track, .miniTrack, .scoreCardTrack{
+        background:#eee !important;
+        border:1px solid #ccc !important;
+      }
+      
+      /* Keep gradient fills visible */
+      .fill, .miniFill, .scoreCardFill{
+        background:#4a7bc8 !important;
+      }
+      
+      /* Simplify grid layouts for better printing */
+      .grid, .scoreCards{
+        display:block !important;
+      }
+      
+      .grid > div, .scoreCard{
+        margin-bottom:15px !important;
+      }
     }
   </style>
 </head>
@@ -1899,9 +1972,17 @@ REPORT_HTML_TEMPLATE = """
 const scanId = "__SCAN_ID__";
 const params = new URLSearchParams(window.location.search);
 const debug = params.get('debug') === '1';
+const printMode = params.get('print') === '1';
 
 const rawWrap = document.getElementById('rawWrap');
 if (rawWrap) rawWrap.style.display = debug ? 'block' : 'none';
+
+// Hide interactive elements in print mode
+if (printMode) {
+  document.querySelectorAll('.actions, .btn, .btn2, .k-btn, button').forEach(el => {
+    el.style.display = 'none';
+  });
+}
 
 // Copy report link function
 async function copyReportLink() {
@@ -1926,9 +2007,49 @@ async function copyReportLink() {
   }
 }
 
-// Download PDF function (triggers print dialog)
-function downloadPDF() {
-  window.print();
+// Download PDF function (uses server-side PDF generation)
+async function downloadPDF() {
+  const btn = document.getElementById('downloadPdfBtn');
+  const originalText = btn.textContent;
+  
+  try {
+    btn.textContent = "Generating PDF...";
+    btn.disabled = true;
+    
+    // Trigger server-side PDF generation
+    const pdfUrl = `/api/scan/${scanId}/pdf`;
+    const response = await fetch(pdfUrl);
+    
+    if (!response.ok) {
+      throw new Error(`Failed to generate PDF: ${response.statusText}`);
+    }
+    
+    // Download the PDF
+    const blob = await response.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `patient-flow-report-${scanId}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    a.remove();
+    
+    btn.textContent = "PDF Downloaded!";
+    setTimeout(() => {
+      btn.textContent = originalText;
+      btn.disabled = false;
+    }, 2000);
+  } catch (error) {
+    console.error('PDF generation failed:', error);
+    btn.textContent = "PDF failed - try browser print";
+    setTimeout(() => {
+      btn.textContent = originalText;
+      btn.disabled = false;
+    }, 3000);
+    // Fallback to browser print dialog
+    window.print();
+  }
 }
 
 const KEY_LABELS = {
@@ -2460,6 +2581,68 @@ def report_page(scan_id: str):
     html = html.replace("__CTA_TEXT__", PRIMARY_CTA_TEXT)
     html = html.replace("__CTA_URL__", PRIMARY_CTA_URL)
     return html
+
+
+@app.get("/api/scan/{scan_id}/pdf")
+def generate_pdf(scan_id: str):
+    """Generate a PDF of the scan report using Playwright."""
+    conn = db()
+    row = conn.execute("SELECT * FROM scans WHERE id=?", (scan_id,)).fetchone()
+    conn.close()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    
+    if row["status"] != "done":
+        raise HTTPException(status_code=400, detail="Scan not complete yet")
+    
+    # Generate PDF using Playwright
+    pdf_path = ARTIFACTS_DIR / scan_id / f"report_{scan_id}.pdf"
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Use localhost for PDF generation (server is always local to itself)
+    # Note: This assumes the server is running on port 8000. For production,
+    # consider using an environment variable for the base URL.
+    report_url = f"http://127.0.0.1:8000/r/{scan_id}?print=1"
+    
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            
+            # Navigate to the report page with a reasonable timeout
+            page.goto(report_url, wait_until="networkidle", timeout=20000)
+            
+            # Wait for the main score element to ensure content is loaded
+            page.wait_for_selector("#score60Main", timeout=10000)
+            
+            # Wait for any remaining dynamic content
+            page.wait_for_load_state("networkidle", timeout=5000)
+            
+            # Generate PDF with specific options
+            page.pdf(
+                path=str(pdf_path),
+                format="A4",
+                print_background=True,
+                display_header_footer=False,
+                margin={
+                    "top": "12mm",
+                    "right": "12mm",
+                    "bottom": "12mm",
+                    "left": "12mm"
+                }
+            )
+            
+            browser.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate PDF: {str(e)}")
+    
+    # Return the PDF file
+    return FileResponse(
+        path=str(pdf_path),
+        media_type="application/pdf",
+        filename=f"patient-flow-report-{scan_id}.pdf"
+    )
 
 
 if __name__ == "__main__":
