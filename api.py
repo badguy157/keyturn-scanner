@@ -1343,6 +1343,44 @@ REPORT_HTML_TEMPLATE = """
     .btn:hover{filter:brightness(1.06);}
     .btn2{background: rgba(255,255,255,.06);}
     .btn2:hover{filter:brightness(1.1);}
+    
+    /* Shared k-btn styles with higher contrast */
+    .k-btn{
+      display:inline-flex; align-items:center; justify-content:center;
+      padding:10px 14px; border-radius:999px;
+      border:2px solid rgba(255,255,255,.30);
+      font-weight:700;
+      cursor:pointer;
+      background: rgba(255,255,255,.08);
+      color: rgba(232,238,252,.95);
+      transition: all 0.2s ease;
+      outline:none;
+    }
+    .k-btn:hover{
+      background: rgba(255,255,255,.14);
+      border-color: rgba(255,255,255,.40);
+      filter:brightness(1.08);
+    }
+    .k-btn:focus-visible{
+      border-color: rgba(122,162,255,.75);
+      box-shadow: 0 0 0 4px rgba(122,162,255,.20);
+    }
+    
+    /* Primary variant with higher prominence */
+    .k-btn--primary{
+      background:linear-gradient(135deg, rgba(122,162,255,.35), rgba(124,247,195,.20));
+      border-color: rgba(122,162,255,.45);
+      box-shadow: 0 10px 30px rgba(0,0,0,.35);
+    }
+    .k-btn--primary:hover{
+      background:linear-gradient(135deg, rgba(122,162,255,.45), rgba(124,247,195,.28));
+      border-color: rgba(122,162,255,.60);
+      filter:brightness(1.10);
+    }
+    .k-btn--primary:focus-visible{
+      border-color: rgba(122,162,255,.85);
+      box-shadow: 0 0 0 4px rgba(122,162,255,.25), 0 10px 30px rgba(0,0,0,.35);
+    }
     .panel{
       background:linear-gradient(180deg, var(--card), rgba(255,255,255,.04));
       border:1px solid var(--line);
@@ -1774,8 +1812,8 @@ REPORT_HTML_TEMPLATE = """
         <div class="status" id="status">Loading...</div>
       </div>
       <div class="actions">
-        <button class="btn2" id="copyLinkBtn" onclick="copyReportLink()">Copy report link</button>
-        <button class="btn2" id="downloadPdfBtn" onclick="downloadPDF()">Download PDF</button>
+        <button class="k-btn" id="copyLinkBtn" onclick="copyReportLink()">Copy report link</button>
+        <button class="k-btn k-btn--primary" id="downloadPdfBtn" onclick="downloadPDF()">Download PDF</button>
       </div>
     </div>
 
