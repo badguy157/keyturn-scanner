@@ -2318,8 +2318,10 @@ def create_scan(req: ScanRequest):
                 raise HTTPException(status_code=402, detail=json.dumps({"error": "DEEP_SCAN_LOCKED"}))
             
             # Check if token has expired
-            expires_at = datetime.fromisoformat(token_row["expires_at"].replace("Z", "+00:00"))
-            if datetime.utcnow() >= expires_at:
+            expires_at_str = token_row["expires_at"].replace("Z", "")
+            expires_at = datetime.fromisoformat(expires_at_str)
+            now = datetime.utcnow()
+            if now >= expires_at:
                 raise HTTPException(status_code=402, detail=json.dumps({"error": "DEEP_SCAN_LOCKED"}))
             
             # Token is valid and not expired - delete it (one-time use)
