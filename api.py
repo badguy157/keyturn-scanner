@@ -2322,14 +2322,17 @@ def unlock_deep_scan(req: DeepUnlockRequest):
         if not row:
             raise HTTPException(status_code=404, detail="Invalid unlock code")
         
-        if row["used_at"]:
-            raise HTTPException(status_code=409, detail="This code has already been used")
-        
-        # Mark code as used
-        conn.execute(
-            "UPDATE deep_scan_codes SET used_at=?, used_for_domain=? WHERE code=?",
+        # Mark code as used atomically (prevents race condition)
+        # Using UPDATE with WHERE clause that checks used_at IS NULL ensures only one request succeeds
+        cursor = conn.execute(
+            "UPDATE deep_scan_codes SET used_at=?, used_for_domain=? WHERE code=? AND used_at IS NULL",
             (now_iso(), normalized_domain, code)
         )
+        
+        if cursor.rowcount == 0:
+            # Code was already used by another concurrent request
+            raise HTTPException(status_code=409, detail="This code has already been used")
+        
         conn.commit()
         
         # Generate a deep_token (one-time token for this domain)
@@ -2384,30 +2387,32 @@ def create_scan(req: ScanRequest):
             except Exception:
                 raise HTTPException(status_code=422, detail="Invalid URL format")
             
-            # Check if token exists and is unused
-            token_row = conn.execute(
-                "SELECT * FROM deep_scan_tokens WHERE token=?",
-                (deep_token,)
-            ).fetchone()
+            # Mark token as used atomically with validation (prevents race condition)
+            # Using UPDATE with WHERE clause ensures only one request succeeds
+            cursor = conn.execute(
+                "UPDATE deep_scan_tokens SET used_at=? WHERE token=? AND used_at IS NULL AND domain=?",
+                (now_iso(), deep_token, normalized_domain)
+            )
             
-            if not token_row:
-                raise HTTPException(status_code=403, detail="Invalid deep scan token")
-            
-            if token_row["used_at"]:
-                raise HTTPException(status_code=403, detail="This deep scan token has already been used")
-            
-            # Verify token is for the correct domain
-            if token_row["domain"] != normalized_domain:
+            if cursor.rowcount == 0:
+                # Token doesn't exist, already used, or wrong domain - need to determine which
+                token_row = conn.execute(
+                    "SELECT * FROM deep_scan_tokens WHERE token=?",
+                    (deep_token,)
+                ).fetchone()
+                
+                if not token_row:
+                    raise HTTPException(status_code=403, detail="Invalid deep scan token")
+                
+                if token_row["used_at"]:
+                    raise HTTPException(status_code=403, detail="This deep scan token has already been used")
+                
+                # Token exists and unused, so domain must be wrong
                 raise HTTPException(
                     status_code=403,
                     detail=f"This token is for {token_row['domain']}, but you're trying to scan {normalized_domain}"
                 )
             
-            # Mark token as used
-            conn.execute(
-                "UPDATE deep_scan_tokens SET used_at=? WHERE token=?",
-                (now_iso(), deep_token)
-            )
             conn.commit()
         finally:
             conn.close()
