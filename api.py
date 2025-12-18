@@ -101,6 +101,9 @@ DEFAULT_MAX_PAGES_QUICK = 1
 DEFAULT_MAX_PAGES_DEEP = 8
 MAX_PAGES_LIMIT = 50
 
+# User agent for HTTP requests
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
 RUBRIC_TEXT = """Clinic Patient-Flow Score – Rubric v0.2
 Categories (0–10 each, total 60)
 Final Patient-Flow Score = Total / 6 (0–10 scale)
@@ -717,7 +720,9 @@ def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
         max_pages: Maximum number of pages to return
     
     Returns:
-        List of URLs to scan, with seed_url always first, up to max_pages
+        List of URLs to scan. The seed_url is guaranteed to be at index 0.
+        Additional URLs are prioritized by keyword scoring and deduplicated.
+        List length is up to max_pages (minimum 1, always includes seed_url).
     """
     print(f"[DISCOVER] Starting discovery for {seed_url}, max_pages={max_pages}")
     
@@ -743,7 +748,7 @@ def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
             print(f"[DISCOVER] Playwright failed ({pw_err}), falling back to requests")
             try:
                 response = requests.get(seed_url, timeout=15, headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                    "User-Agent": USER_AGENT
                 })
                 html = response.text
             except Exception as req_err:
@@ -802,10 +807,12 @@ def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
                 break
             result.append(url)
         
+        # Create a score lookup map for efficient logging
+        score_map = {url: score for score, url in scored_urls}
+        
         print(f"[DISCOVER] Found {len(discovered_urls)} internal URLs, returning top {len(result)}")
         for i, url in enumerate(result[:10]):  # Log first 10
-            # Reuse score from scored_urls if available
-            score = next((s for s, u in scored_urls if u == url), 0)
+            score = score_map.get(url, 0)
             print(f"  [{i+1}] (score={score}) {url}")
         
         return result
@@ -1530,7 +1537,10 @@ def analyze_pages(pages: List[Dict[str, Any]], target_url: str) -> Dict[str, Any
     
     NOTE: Currently, scoring only uses the first page (home/seed URL) evidence.
     Additional pages are captured and stored in evidence but not yet used for scoring.
-    Future enhancement: Aggregate signals from multiple pages to improve deep mode scoring.
+    
+    TODO: Aggregate signals from multiple pages to improve deep mode scoring. This is a
+    known limitation - deep mode will capture multiple pages but they won't affect the
+    score until this enhancement is implemented.
     
     Args:
         pages: List of captured page data (each with desktop/mobile evidence)
