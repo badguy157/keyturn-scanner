@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urljoin, urlparse
 
+import requests
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
@@ -94,6 +95,11 @@ SCAN_STATUS_ERROR = "error"
 SCAN_STATUS_QUEUED = "queued"
 SCAN_STATUS_RUNNING = "running"
 SCAN_STATUS_SCORING = "scoring"
+
+# Scan mode defaults
+DEFAULT_MAX_PAGES_QUICK = 1
+DEFAULT_MAX_PAGES_DEEP = 8
+MAX_PAGES_LIMIT = 50
 
 RUBRIC_TEXT = """Clinic Patient-Flow Score – Rubric v0.2
 Categories (0–10 each, total 60)
@@ -366,6 +372,11 @@ def slugify(name: str) -> str:
     s = s.strip('-')
     
     return s
+
+
+def get_default_max_pages(mode: str) -> int:
+    """Get default max_pages for a given mode."""
+    return DEFAULT_MAX_PAGES_QUICK if mode == "quick" else DEFAULT_MAX_PAGES_DEEP
 
 
 def _ai_ready() -> (bool, str):
@@ -731,7 +742,6 @@ def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
         except Exception as pw_err:
             print(f"[DISCOVER] Playwright failed ({pw_err}), falling back to requests")
             try:
-                import requests
                 response = requests.get(seed_url, timeout=15, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
                 })
@@ -794,7 +804,8 @@ def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
         
         print(f"[DISCOVER] Found {len(discovered_urls)} internal URLs, returning top {len(result)}")
         for i, url in enumerate(result[:10]):  # Log first 10
-            score = _score_url(url)
+            # Reuse score from scored_urls if available
+            score = next((s for s, u in scored_urls if u == url), 0)
             print(f"  [{i+1}] (score={score}) {url}")
         
         return result
@@ -1517,6 +1528,10 @@ def capture_page(url: str, scan_dir: Path, page_index: int = 0) -> Dict[str, Any
 def analyze_pages(pages: List[Dict[str, Any]], target_url: str) -> Dict[str, Any]:
     """Analyze captured pages and generate scores.
     
+    NOTE: Currently, scoring only uses the first page (home/seed URL) evidence.
+    Additional pages are captured and stored in evidence but not yet used for scoring.
+    Future enhancement: Aggregate signals from multiple pages to improve deep mode scoring.
+    
     Args:
         pages: List of captured page data (each with desktop/mobile evidence)
         target_url: The original target URL for the scan
@@ -1524,8 +1539,6 @@ def analyze_pages(pages: List[Dict[str, Any]], target_url: str) -> Dict[str, Any
     Returns:
         Scoring output dictionary
     """
-    # For now, use the first page (home) for scoring
-    # In the future, this could aggregate signals from multiple pages
     if not pages:
         raise RuntimeError("No pages to analyze")
     
@@ -1538,6 +1551,7 @@ def analyze_pages(pages: List[Dict[str, Any]], target_url: str) -> Dict[str, Any
     }
     
     # Add additional pages to evidence if available
+    # These are stored for future use but not currently factored into scoring
     if len(pages) > 1:
         evidence["additional_pages"] = [
             {
@@ -1561,7 +1575,7 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
     try:
         # Set default max_pages based on mode
         if max_pages is None:
-            max_pages = 1 if mode == "quick" else 8
+            max_pages = get_default_max_pages(mode)
         
         conn.execute("UPDATE scans SET status=?, updated_at=? WHERE id=?", (SCAN_STATUS_RUNNING, now_iso(), scan_id))
         conn.commit()
@@ -1977,19 +1991,19 @@ def create_scan(req: ScanRequest):
         if not ok:
             raise HTTPException(status_code=500, detail=msg)
 
-    # Get mode and max_pages from request
-    mode = req.mode or "quick"
+    # Get mode and max_pages from request (mode defaults to "quick" via Pydantic)
+    mode = req.mode
     max_pages = req.max_pages
     
     # Set default max_pages based on mode if not provided
     if max_pages is None:
-        max_pages = 1 if mode == "quick" else 8
+        max_pages = get_default_max_pages(mode)
     
     # Validate max_pages
     if max_pages < 1:
         raise HTTPException(status_code=422, detail="max_pages must be at least 1")
-    if max_pages > 50:
-        raise HTTPException(status_code=422, detail="max_pages cannot exceed 50")
+    if max_pages > MAX_PAGES_LIMIT:
+        raise HTTPException(status_code=422, detail=f"max_pages cannot exceed {MAX_PAGES_LIMIT}")
 
     scan_id = uuid.uuid4().hex
     
