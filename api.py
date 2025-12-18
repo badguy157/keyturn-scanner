@@ -1,12 +1,17 @@
 # api.py (v1.0) - Patient-Flow Scanner w/ AI scoring (OpenAI Responses API)
 # Run:
-#   python -m pip install -U fastapi uvicorn beautifulsoup4 playwright openai
+#   python -m pip install -U fastapi uvicorn beautifulsoup4 playwright openai resend
 #   python -m playwright install chromium
 #
 # PowerShell (IMPORTANT: run each line ONCE, do NOT paste your key by itself on the next line):
 #   $env:OPENAI_API_KEY="sk-...your key..."
 #   $env:OPENAI_MODEL="gpt-5"     # or "gpt-5.2" if your account has it
 #   $env:SCORING_MODE="ai"        # or "rules"
+#
+# Email configuration (for report delivery):
+#   $env:RESEND_API_KEY="re_...your key..."
+#   $env:EMAIL_FROM="Keyturn Studio <onboarding@resend.dev>"
+#   $env:PUBLIC_BASE_URL="https://scan.keyturn.studio"
 #
 # Optional branding:
 #   $env:APP_NAME="Keyturn Studio"
@@ -78,11 +83,17 @@ SCORING_MODE = os.getenv("SCORING_MODE", "ai").lower().strip()  # ai | rules
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
 EMAIL_FROM = os.getenv("EMAIL_FROM", "Keyturn Studio <onboarding@resend.dev>").strip()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://scan.keyturn.studio").strip()
+ENABLE_TEST_ENDPOINTS = os.getenv("ENABLE_TEST_ENDPOINTS", "false").lower() in ("true", "1", "yes")
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 # Constants
 MAX_PUBLIC_ID_ATTEMPTS = 10
+SCAN_STATUS_DONE = "done"
+SCAN_STATUS_ERROR = "error"
+SCAN_STATUS_QUEUED = "queued"
+SCAN_STATUS_RUNNING = "running"
+SCAN_STATUS_SCORING = "scoring"
 
 RUBRIC_TEXT = """Clinic Patient-Flow Score – Rubric v0.2
 Categories (0–10 each, total 60)
@@ -1275,7 +1286,7 @@ Return output that fits the required JSON schema.
 def run_scan(scan_id: str, url: str) -> None:
     conn = db()
     try:
-        conn.execute("UPDATE scans SET status=?, updated_at=? WHERE id=?", ("running", now_iso(), scan_id))
+        conn.execute("UPDATE scans SET status=?, updated_at=? WHERE id=?", (SCAN_STATUS_RUNNING, now_iso(), scan_id))
         conn.commit()
 
         scan_dir = ARTIFACTS_DIR / scan_id
@@ -1306,7 +1317,7 @@ def run_scan(scan_id: str, url: str) -> None:
         # Save evidence early so the report page can show screenshots while AI is scoring.
         conn.execute(
             "UPDATE scans SET status=?, updated_at=?, evidence_json=? WHERE id=?",
-            ("scoring", now_iso(), json.dumps(evidence), scan_id),
+            (SCAN_STATUS_SCORING, now_iso(), json.dumps(evidence), scan_id),
         )
         conn.commit()
 
@@ -1328,7 +1339,7 @@ def run_scan(scan_id: str, url: str) -> None:
         # Update scans with slug before marking as done
         conn.execute(
             "UPDATE scans SET status=?, updated_at=?, evidence_json=?, score_json=?, error=?, slug=? WHERE id=?",
-            ("done", now_iso(), json.dumps(evidence), json.dumps(output), None, slug, scan_id),
+            (SCAN_STATUS_DONE, now_iso(), json.dumps(evidence), json.dumps(output), None, slug, scan_id),
         )
         conn.commit()
         
@@ -1397,7 +1408,7 @@ def run_scan(scan_id: str, url: str) -> None:
     except Exception as e:
         conn.execute(
             "UPDATE scans SET status=?, updated_at=?, error=? WHERE id=?",
-            ("error", now_iso(), str(e), scan_id),
+            (SCAN_STATUS_ERROR, now_iso(), str(e), scan_id),
         )
         conn.commit()
     finally:
@@ -1673,7 +1684,7 @@ def create_scan(req: ScanRequest):
         
         conn.execute(
             "INSERT INTO scans (id, url, status, created_at, updated_at, email, public_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (scan_id, str(req.url), "queued", now_iso(), now_iso(), email, public_id),
+            (scan_id, str(req.url), SCAN_STATUS_QUEUED, now_iso(), now_iso(), email, public_id),
         )
         conn.commit()
         
@@ -1756,7 +1767,7 @@ def email_report(req: EmailReportRequest, request: Request):
         raise HTTPException(status_code=404, detail="Report not found")
     
     # Check if scan is complete
-    if row["status"] != "done":
+    if row["status"] != SCAN_STATUS_DONE:
         raise HTTPException(status_code=400, detail="Report is not ready yet. Please wait for the scan to complete.")
     
     # Get clinic name from score
@@ -1903,10 +1914,12 @@ def email_scan_receipt(req: EmailReportRequest, request: Request):
 
 @app.get("/api/email/test")
 def test_email(to: str = "test@example.com"):
-    """Development-only test route to send a simple test email."""
-    # Only enable in development
-    if SCORING_MODE != "rules" and os.getenv("OPENAI_API_KEY"):
-        # If in production mode (has OpenAI key set), disable test route
+    """Development-only test route to send a simple test email.
+    
+    Enable by setting ENABLE_TEST_ENDPOINTS=true environment variable.
+    """
+    # Only enable if explicitly configured
+    if not ENABLE_TEST_ENDPOINTS:
         raise HTTPException(status_code=404, detail="Not found")
     
     # Validate email
@@ -3788,7 +3801,7 @@ def generate_pdf(scan_id: str):
     if not row:
         raise HTTPException(status_code=404, detail="Scan not found")
     
-    if row["status"] != "done":
+    if row["status"] != SCAN_STATUS_DONE:
         raise HTTPException(status_code=400, detail="Scan not complete yet")
     
     # Generate PDF using Playwright
