@@ -90,6 +90,7 @@ ENABLE_TEST_ENDPOINTS = os.getenv("ENABLE_TEST_ENDPOINTS", "false").lower() in (
 
 # Deep scan configuration
 DEEP_SCAN_CODES = os.getenv("DEEP_SCAN_CODES", "").strip()
+KT_ADMIN_TOKEN = os.getenv("KT_ADMIN_TOKEN", "").strip()
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -2283,9 +2284,32 @@ def unlock_deep_scan(req: DeepUnlockRequest):
     if not code:
         raise HTTPException(status_code=422, detail="Code is required")
     
+    # Check admin token first (before parsing any token format logic)
+    if KT_ADMIN_TOKEN and constant_time_compare(code, KT_ADMIN_TOKEN):
+        # Admin token accepted - generate a long-lived token
+        token = uuid.uuid4().hex
+        expires_at = (datetime.utcnow() + timedelta(hours=24)).isoformat(timespec="seconds") + "Z"
+        
+        # Store token in database
+        conn = db()
+        try:
+            conn.execute(
+                "INSERT INTO deep_tokens (token, expires_at) VALUES (?, ?)",
+                (token, expires_at)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        
+        return {
+            "ok": True,
+            "token": token,
+            "expires_at": expires_at
+        }
+    
     # Get all codes from environment and compare using constant-time
     if not DEEP_SCAN_CODES:
-        raise HTTPException(status_code=404, detail="Invalid code")
+        raise HTTPException(status_code=403, detail="Invalid token")
     
     codes = [c.strip() for c in DEEP_SCAN_CODES.split(",") if c.strip()]
     
@@ -2298,7 +2322,7 @@ def unlock_deep_scan(req: DeepUnlockRequest):
         # Don't break - continue checking all codes to maintain constant time
     
     if not code_valid:
-        raise HTTPException(status_code=404, detail="Invalid code")
+        raise HTTPException(status_code=403, detail="Invalid token")
     
     # Generate a token with 24h expiration
     token = uuid.uuid4().hex
