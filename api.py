@@ -10,7 +10,7 @@
 #
 # Email configuration (for report delivery):
 #   $env:RESEND_API_KEY="re_...your key..."
-#   $env:EMAIL_FROM="Keyturn Studio <onboarding@resend.dev>"
+#   $env:RESEND_FROM="Keyturn Studio <reports@keyturn.studio>"
 #   $env:PUBLIC_BASE_URL="https://scan.keyturn.studio"
 #
 # Optional branding:
@@ -81,7 +81,7 @@ SCORING_MODE = os.getenv("SCORING_MODE", "ai").lower().strip()  # ai | rules
 
 # Email configuration
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
-EMAIL_FROM = os.getenv("EMAIL_FROM", "Keyturn Studio <onboarding@resend.dev>").strip()
+RESEND_FROM = os.getenv("RESEND_FROM", "Keyturn Studio <reports@keyturn.studio>").strip()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://scan.keyturn.studio").strip()
 ENABLE_TEST_ENDPOINTS = os.getenv("ENABLE_TEST_ENDPOINTS", "false").lower() in ("true", "1", "yes")
 
@@ -554,23 +554,30 @@ def send_email_via_resend(recipient: str, subject: str, html_content: str) -> Di
     if not RESEND_API_KEY:
         return {
             "ok": False,
-            "error": "RESEND_API_KEY not configured"
+            "error": "Email service is not configured. Please contact support."
+        }
+    
+    if not RESEND_FROM:
+        return {
+            "ok": False,
+            "error": "Email service is not configured. Please contact support."
         }
     
     if resend is None:
         return {
             "ok": False,
-            "error": "Resend package not installed"
+            "error": "Email service is not available. Please contact support."
         }
     
     try:
         resend.api_key = RESEND_API_KEY
         
         params = {
-            "from": EMAIL_FROM,
+            "from": RESEND_FROM,
             "to": [recipient],
             "subject": subject,
             "html": html_content,
+            "reply_to": "hello@keyturn.studio",
         }
         
         response = resend.Emails.send(params)
