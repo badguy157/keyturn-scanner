@@ -32,7 +32,7 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, HttpUrl, conint
 from playwright.sync_api import sync_playwright
@@ -43,6 +43,8 @@ try:
 except Exception:
     OpenAI = None  # type: ignore
 
+
+BASE_DIR = Path(__file__).resolve().parent
 
 DB_PATH = "patientflow.sqlite"
 ARTIFACTS_DIR = Path("artifacts")
@@ -122,6 +124,37 @@ app = FastAPI()
 
 # Serve screenshots + artifacts at /artifacts/<scan_id>/<file>
 app.mount("/artifacts", StaticFiles(directory=str(ARTIFACTS_DIR)), name="artifacts")
+
+
+# Favicon routes
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon_ico():
+    return FileResponse(BASE_DIR / "favicon.ico", media_type="image/x-icon")
+
+
+@app.get("/favicon.svg", include_in_schema=False)
+def favicon_svg():
+    return FileResponse(BASE_DIR / "favicon.svg", media_type="image/svg+xml")
+
+
+@app.get("/favicon-16x16.png", include_in_schema=False)
+def favicon_16():
+    return FileResponse(BASE_DIR / "favicon-16x16.png", media_type="image/png")
+
+
+@app.get("/favicon-32x32.png", include_in_schema=False)
+def favicon_32():
+    return FileResponse(BASE_DIR / "favicon-32x32.png", media_type="image/png")
+
+
+@app.get("/android-chrome-192x192.png", include_in_schema=False)
+def android_chrome_192():
+    return FileResponse(BASE_DIR / "android-chrome-192x192.png", media_type="image/png")
+
+
+@app.get("/android-chrome-512x512.png", include_in_schema=False)
+def android_chrome_512():
+    return FileResponse(BASE_DIR / "android-chrome-512x512.png", media_type="image/png")
 
 
 def db() -> sqlite3.Connection:
