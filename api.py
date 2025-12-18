@@ -2600,35 +2600,42 @@ def generate_pdf(scan_id: str):
     pdf_path = ARTIFACTS_DIR / scan_id / f"report_{scan_id}.pdf"
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # Construct the URL to render (with print mode)
-    report_url = f"http://localhost:8000/r/{scan_id}?print=1"
+    # Use localhost for PDF generation (server is always local to itself)
+    # Note: This assumes the server is running on port 8000. For production,
+    # consider using an environment variable for the base URL.
+    report_url = f"http://127.0.0.1:8000/r/{scan_id}?print=1"
     
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        
-        # Navigate to the report page
-        page.goto(report_url, wait_until="networkidle", timeout=30000)
-        
-        # Wait for content to load
-        page.wait_for_selector("#score60Main", timeout=10000)
-        page.wait_for_timeout(2000)  # Extra time for any dynamic content
-        
-        # Generate PDF with specific options
-        page.pdf(
-            path=str(pdf_path),
-            format="A4",
-            print_background=True,
-            display_header_footer=False,
-            margin={
-                "top": "12mm",
-                "right": "12mm",
-                "bottom": "12mm",
-                "left": "12mm"
-            }
-        )
-        
-        browser.close()
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            
+            # Navigate to the report page with a reasonable timeout
+            page.goto(report_url, wait_until="networkidle", timeout=20000)
+            
+            # Wait for the main score element to ensure content is loaded
+            page.wait_for_selector("#score60Main", timeout=10000)
+            
+            # Wait for any remaining dynamic content
+            page.wait_for_load_state("networkidle", timeout=5000)
+            
+            # Generate PDF with specific options
+            page.pdf(
+                path=str(pdf_path),
+                format="A4",
+                print_background=True,
+                display_header_footer=False,
+                margin={
+                    "top": "12mm",
+                    "right": "12mm",
+                    "bottom": "12mm",
+                    "left": "12mm"
+                }
+            )
+            
+            browser.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate PDF: {str(e)}")
     
     # Return the PDF file
     return FileResponse(
