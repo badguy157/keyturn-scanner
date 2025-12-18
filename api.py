@@ -52,7 +52,7 @@ ARTIFACTS_DIR.mkdir(exist_ok=True)
 
 APP_NAME = os.getenv("APP_NAME", "Keyturn Studio").strip() or "Keyturn Studio"
 APP_PRODUCT = os.getenv("APP_PRODUCT", "Patient-Flow Quick Scan").strip() or "Patient-Flow Quick Scan"
-PRIMARY_CTA_TEXT = os.getenv("PRIMARY_CTA_TEXT", "Get the Blueprint ($1,000)").strip() or "Get the Blueprint"
+PRIMARY_CTA_TEXT = os.getenv("PRIMARY_CTA_TEXT", "Get the Blueprint").strip() or "Get the Blueprint"
 PRIMARY_CTA_URL = os.getenv("PRIMARY_CTA_URL", "https://www.keyturn.studio/quote.html").strip() or "https://www.keyturn.studio/quote.html"
 
 # Defaults
