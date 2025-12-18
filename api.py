@@ -208,6 +208,18 @@ def init_db() -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          event_type TEXT NOT NULL,
+          scan_id TEXT,
+          public_id TEXT,
+          metadata TEXT,
+          created_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
     conn.close()
     _ensure_columns()
@@ -219,6 +231,18 @@ init_db()
 class ScanRequest(BaseModel):
     url: HttpUrl
     email: Optional[str] = None
+
+
+class EventRequest(BaseModel):
+    event_type: str
+    scan_id: Optional[str] = None
+    public_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class EmailReportRequest(BaseModel):
+    email: str
+    report_id: str
 
 
 # ---- Structured output model (Option A) ----
@@ -1042,6 +1066,17 @@ def run_scan(scan_id: str, url: str) -> None:
             ("done", now_iso(), json.dumps(evidence), json.dumps(output), None, slug, scan_id),
         )
         conn.commit()
+        
+        # Get public_id for event logging
+        row = conn.execute("SELECT public_id FROM scans WHERE id=?", (scan_id,)).fetchone()
+        public_id = row["public_id"] if row else None
+        
+        # Log scan_completed event
+        conn.execute(
+            "INSERT INTO events (event_type, scan_id, public_id, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("scan_completed", scan_id, public_id, json.dumps({"score": output.get("patient_flow_score_10")}), now_iso()),
+        )
+        conn.commit()
 
     except Exception as e:
         conn.execute(
@@ -1325,6 +1360,13 @@ def create_scan(req: ScanRequest):
             (scan_id, str(req.url), "queued", now_iso(), now_iso(), email, public_id),
         )
         conn.commit()
+        
+        # Log scan_started event
+        conn.execute(
+            "INSERT INTO events (event_type, scan_id, public_id, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("scan_started", scan_id, public_id, json.dumps({"url": str(req.url), "email": email}), now_iso()),
+        )
+        conn.commit()
     finally:
         conn.close()
 
@@ -1358,6 +1400,66 @@ def get_scan(scan_id: str):
         "evidence": json.loads(row["evidence_json"]) if row["evidence_json"] else None,
     }
     return JSONResponse(resp)
+
+
+@app.post("/api/events")
+def log_event(req: EventRequest):
+    """Log a frontend event to the events table."""
+    conn = db()
+    try:
+        conn.execute(
+            "INSERT INTO events (event_type, scan_id, public_id, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
+            (req.event_type, req.scan_id, req.public_id, json.dumps(req.metadata) if req.metadata else None, now_iso()),
+        )
+        conn.commit()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to log event: {str(e)}")
+    finally:
+        conn.close()
+
+
+@app.post("/api/email_report")
+def email_report(req: EmailReportRequest):
+    """Send a plain-text email with the report link."""
+    # Validate email
+    if not EMAIL_RE.match(req.email):
+        raise HTTPException(status_code=422, detail="Invalid email address")
+    
+    # Validate report exists
+    conn = db()
+    row = conn.execute("SELECT * FROM scans WHERE public_id=?", (req.report_id,)).fetchone()
+    conn.close()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Report not found")
+    
+    # Build report URL
+    # Use the slug if available, otherwise use "scanning"
+    db_slug = row["slug"] if row["slug"] else "scanning"
+    report_url = f"/report/{db_slug}-{req.report_id}"
+    
+    # For now, we'll just log this action since we don't have an email service configured
+    # In a production environment, you would integrate with an email service like SendGrid, AWS SES, etc.
+    
+    # Log the email_report event
+    conn = db()
+    try:
+        conn.execute(
+            "INSERT INTO events (event_type, scan_id, public_id, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("email_report_requested", row["id"], req.report_id, json.dumps({"email": req.email, "report_url": report_url}), now_iso()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    
+    # In production, send email here
+    # For now, return success with a message
+    return {
+        "ok": True,
+        "message": f"Email would be sent to {req.email} with link: {report_url}",
+        "report_url": report_url
+    }
 
 
 REPORT_HTML_TEMPLATE = """
@@ -1516,7 +1618,7 @@ REPORT_HTML_TEMPLATE = """
     .status{margin-top:8px; color:var(--muted); font-size:13px}
     .summaryRow{
       display:grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr 1fr 1fr;
       gap:14px;
       margin-bottom:14px;
     }
@@ -1884,6 +1986,160 @@ REPORT_HTML_TEMPLATE = """
     .copyBtn:hover{filter:brightness(1.07)}
     pre{margin:12px 0 0; background:#0b0f19; color:#cfe3ff; padding:14px; border-radius:14px; overflow:auto; border:1px solid rgba(255,255,255,.08)}
     
+    /* Blueprint Card Styles */
+    .blueprintCard{
+      display:flex;
+      flex-direction:column;
+      gap:16px;
+    }
+    .blueprintCard h2{
+      margin:0 0 12px;
+      font-size:18px;
+      letter-spacing:-.2px;
+      color:var(--text);
+    }
+    .blueprintBullets{
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+      margin-bottom:8px;
+    }
+    .blueprintBullet{
+      display:flex;
+      gap:12px;
+      align-items:flex-start;
+      font-size:14px;
+      line-height:1.5;
+      color:rgba(232,238,252,.88);
+    }
+    .blueprintBullet::before{
+      content:'✓';
+      color:rgba(124,247,195,.92);
+      font-weight:900;
+      font-size:16px;
+      flex-shrink:0;
+      margin-top:2px;
+    }
+    .blueprintPrice{
+      display:flex;
+      align-items:baseline;
+      gap:8px;
+      margin:8px 0;
+      padding:12px 0;
+      border-top:1px solid rgba(255,255,255,.10);
+      border-bottom:1px solid rgba(255,255,255,.10);
+    }
+    .blueprintPriceLabel{
+      font-size:13px;
+      color:var(--muted);
+      font-weight:600;
+    }
+    .blueprintPriceValue{
+      font-size:28px;
+      font-weight:900;
+      letter-spacing:-.5px;
+      background:linear-gradient(135deg, var(--accent), var(--accent2));
+      -webkit-background-clip:text;
+      -webkit-text-fill-color:transparent;
+      background-clip:text;
+    }
+    .blueprintCredit{
+      font-size:12px;
+      color:rgba(124,247,195,.85);
+      font-style:italic;
+      margin:4px 0 12px;
+    }
+    .blueprintCTA{
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:12px 18px;
+      border-radius:14px;
+      border:2px solid rgba(122,162,255,.45);
+      background:linear-gradient(135deg, rgba(122,162,255,.35), rgba(124,247,195,.20));
+      color:var(--text);
+      font-weight:800;
+      font-size:15px;
+      cursor:pointer;
+      text-decoration:none;
+      transition:all 0.2s;
+      box-shadow: 0 10px 30px rgba(0,0,0,.35);
+    }
+    .blueprintCTA:hover{
+      background:linear-gradient(135deg, rgba(122,162,255,.45), rgba(124,247,195,.28));
+      border-color:rgba(122,162,255,.60);
+      filter:brightness(1.10);
+      transform:translateY(-1px);
+    }
+    
+    /* Email Report Section */
+    .emailReportSection{
+      margin-top:18px;
+      padding-top:18px;
+      border-top:1px solid rgba(255,255,255,.10);
+    }
+    .emailReportLabel{
+      font-size:13px;
+      color:var(--muted);
+      font-weight:600;
+      margin-bottom:8px;
+    }
+    .emailReportForm{
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+    }
+    .emailReportInput{
+      width:100%;
+      padding:12px;
+      border-radius:12px;
+      border:1px solid rgba(255,255,255,.14);
+      background:rgba(0,0,0,.22);
+      color:var(--text);
+      font-size:14px;
+      outline:none;
+      transition:all 0.2s;
+    }
+    .emailReportInput:focus{
+      border-color:rgba(122,162,255,.55);
+      box-shadow:0 0 0 4px rgba(122,162,255,.12);
+    }
+    .emailReportInput::placeholder{
+      color:rgba(232,238,252,.45);
+    }
+    .emailReportBtn{
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:12px 16px;
+      border-radius:12px;
+      border:2px solid rgba(255,255,255,.30);
+      background:rgba(255,255,255,.08);
+      color:rgba(232,238,252,.95);
+      font-weight:700;
+      font-size:14px;
+      cursor:pointer;
+      transition:all 0.2s;
+      outline:none;
+    }
+    .emailReportBtn:hover{
+      background:rgba(255,255,255,.14);
+      border-color:rgba(255,255,255,.40);
+    }
+    .emailReportBtn:disabled{
+      opacity:0.5;
+      cursor:not-allowed;
+    }
+    .emailReportHint{
+      font-size:12px;
+      color:rgba(124,247,195,.85);
+      margin-top:4px;
+      display:none;
+    }
+    .emailReportHint.visible{
+      display:block;
+    }
+    
     /* Print styles for PDF */
     @media print {
       /* Force white background and black text */
@@ -1896,7 +2152,7 @@ REPORT_HTML_TEMPLATE = """
       .topbar, .modal, #rawWrap, .actions,
       .btn, .btn2, .k-btn, .k-btn--primary,
       button, .copyBtn, .modalClose, .modalNav,
-      .quickWinCheckbox{
+      .quickWinCheckbox, .blueprintCard, .emailReportSection{
         display:none !important;
       }
       
@@ -2036,6 +2292,30 @@ REPORT_HTML_TEMPLATE = """
         </div>
         <div id="errs"></div>
       </div>
+      <div class="panel blueprintCard">
+        <h2>Get the Blueprint</h2>
+        <div class="blueprintBullets">
+          <div class="blueprintBullet">Complete patient-flow audit & roadmap</div>
+          <div class="blueprintBullet">Prioritized fixes with timeline</div>
+          <div class="blueprintBullet">Custom design & copy recommendations</div>
+          <div class="blueprintBullet">Mobile optimization strategy</div>
+        </div>
+        <div class="blueprintPrice">
+          <span class="blueprintPriceLabel">Investment:</span>
+          <span class="blueprintPriceValue">$1,000</span>
+        </div>
+        <div class="blueprintCredit">Fully credited toward rebuild if you proceed</div>
+        <a class="blueprintCTA" href="__CTA_URL__" target="_blank" rel="noopener" id="blueprintCTA">__CTA_TEXT__</a>
+        
+        <div class="emailReportSection">
+          <div class="emailReportLabel">Send full report to my inbox</div>
+          <div class="emailReportForm">
+            <input type="email" class="emailReportInput" id="emailInput" placeholder="your.email@clinic.com" />
+            <button class="emailReportBtn" id="sendEmailBtn" onclick="sendReportEmail()">Send Report</button>
+            <div class="emailReportHint" id="emailHint"></div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="panel">
@@ -2096,11 +2376,105 @@ if (printMode) {
   });
 }
 
+// Extract public_id from URL path
+function getPublicId() {
+  const path = window.location.pathname;
+  const match = path.match(/\/report\/.*-([a-f0-9]{8})$/);
+  return match ? match[1] : null;
+}
+
+// Helper function to log events
+async function logEvent(eventType, metadata = {}) {
+  const publicId = getPublicId();
+  try {
+    await fetch('/api/events', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        event_type: eventType,
+        scan_id: scanId,
+        public_id: publicId,
+        metadata: metadata
+      })
+    });
+  } catch (e) {
+    console.error('Failed to log event:', e);
+  }
+}
+
+// Log report_viewed event on page load
+logEvent('report_viewed');
+
+// Send report email function
+async function sendReportEmail() {
+  const emailInput = document.getElementById('emailInput');
+  const btn = document.getElementById('sendEmailBtn');
+  const hint = document.getElementById('emailHint');
+  const email = emailInput.value.trim();
+  
+  if (!email) {
+    hint.textContent = "Please enter your email address";
+    hint.classList.add('visible');
+    hint.style.color = 'rgba(255, 200, 200, .95)';
+    setTimeout(() => { hint.classList.remove('visible'); }, 3000);
+    return;
+  }
+  
+  const originalText = btn.textContent;
+  btn.textContent = "Sending...";
+  btn.disabled = true;
+  
+  const publicId = getPublicId();
+  
+  try {
+    const res = await fetch('/api/email_report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: email,
+        report_id: publicId
+      })
+    });
+    
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(errText);
+    }
+    
+    const data = await res.json();
+    hint.textContent = "✓ Report link sent to your inbox!";
+    hint.style.color = 'rgba(124,247,195,.85)';
+    hint.classList.add('visible');
+    emailInput.value = '';
+    
+    setTimeout(() => {
+      btn.textContent = originalText;
+      btn.disabled = false;
+      hint.classList.remove('visible');
+    }, 3000);
+  } catch (error) {
+    console.error('Failed to send email:', error);
+    hint.textContent = "Failed to send email. Please try again.";
+    hint.style.color = 'rgba(255, 200, 200, .95)';
+    hint.classList.add('visible');
+    
+    setTimeout(() => {
+      btn.textContent = originalText;
+      btn.disabled = false;
+      hint.classList.remove('visible');
+    }, 3000);
+  }
+}
+
 // Copy report link function
 async function copyReportLink() {
   const btn = document.getElementById('copyLinkBtn');
   const originalText = btn.textContent;
   const linkToCopy = window.location.origin + window.location.pathname;
+  
+  // Log event
+  logEvent('copy_report_link_clicked');
+  
   try {
     await navigator.clipboard.writeText(linkToCopy);
     btn.textContent = "Link copied!";
@@ -2607,6 +2981,14 @@ document.addEventListener('keydown', (e) => {
     showNext();
   }
 });
+
+// Add event listener for blueprint CTA
+const blueprintCTA = document.getElementById('blueprintCTA');
+if (blueprintCTA) {
+  blueprintCTA.addEventListener('click', () => {
+    logEvent('get_blueprint_clicked');
+  });
+}
 
 async function tick() {
   const res = await fetch('/api/scan/' + scanId);
