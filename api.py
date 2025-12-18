@@ -25,7 +25,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urljoin, urlparse
@@ -42,6 +42,12 @@ try:
     from openai import OpenAI  # type: ignore
 except Exception:
     OpenAI = None  # type: ignore
+
+# Import Resend safely
+try:
+    import resend  # type: ignore
+except Exception:
+    resend = None  # type: ignore
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -67,6 +73,11 @@ OPENAI_MODEL_FALLBACKS = [
 # If you want to disable AI quickly:
 #   $env:SCORING_MODE="rules"
 SCORING_MODE = os.getenv("SCORING_MODE", "ai").lower().strip()  # ai | rules
+
+# Email configuration
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
+EMAIL_FROM = os.getenv("EMAIL_FROM", "Keyturn Studio <onboarding@resend.dev>").strip()
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://scan.keyturn.studio").strip()
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -220,6 +231,36 @@ def init_db() -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS email_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          recipient TEXT NOT NULL,
+          report_id TEXT,
+          email_type TEXT NOT NULL,
+          status TEXT NOT NULL,
+          provider_message_id TEXT,
+          error_message TEXT,
+          created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS email_rate_limits (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          identifier TEXT NOT NULL,
+          email_type TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_email_rate_limits_lookup 
+        ON email_rate_limits(identifier, email_type, created_at)
+        """
+    )
     conn.commit()
     conn.close()
     _ensure_columns()
@@ -316,6 +357,230 @@ def _ai_ready() -> (bool, str):
     if not os.getenv("OPENAI_API_KEY"):
         return False, "AI mode needs OPENAI_API_KEY. In PowerShell: $env:OPENAI_API_KEY=\"sk-...\""
     return True, ""
+
+
+# ---- Email Service Functions ----
+
+def check_email_rate_limit(identifier: str, email_type: str, window_seconds: int = 300, max_emails: int = 3) -> bool:
+    """Check if the identifier (email or IP) has exceeded rate limit.
+    
+    Args:
+        identifier: Email address or IP address
+        email_type: Type of email (e.g., "report", "scan_receipt")
+        window_seconds: Time window in seconds (default: 5 minutes)
+        max_emails: Maximum emails allowed in the window
+    
+    Returns:
+        True if rate limit is exceeded, False otherwise
+    """
+    conn = db()
+    try:
+        # Calculate cutoff time
+        cutoff_time = datetime.utcnow() - timedelta(seconds=window_seconds)
+        cutoff_iso = cutoff_time.isoformat(timespec="seconds") + "Z"
+        
+        # Count recent emails
+        count_row = conn.execute(
+            """
+            SELECT COUNT(*) as count 
+            FROM email_rate_limits 
+            WHERE identifier=? AND email_type=? AND created_at > ?
+            """,
+            (identifier, email_type, cutoff_iso)
+        ).fetchone()
+        
+        count = count_row["count"] if count_row else 0
+        return count >= max_emails
+    finally:
+        conn.close()
+
+
+def log_email_rate_limit(identifier: str, email_type: str) -> None:
+    """Log an email send attempt for rate limiting."""
+    conn = db()
+    try:
+        conn.execute(
+            "INSERT INTO email_rate_limits (identifier, email_type, created_at) VALUES (?, ?, ?)",
+            (identifier, email_type, now_iso())
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def log_email_send(recipient: str, report_id: Optional[str], email_type: str, status: str, 
+                   provider_message_id: Optional[str] = None, error_message: Optional[str] = None) -> None:
+    """Log email send attempt to database."""
+    conn = db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO email_logs 
+            (recipient, report_id, email_type, status, provider_message_id, error_message, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (recipient, report_id, email_type, status, provider_message_id, error_message, now_iso())
+        )
+        conn.commit()
+        
+        # Log to console for debugging
+        if status == "sent":
+            print(f"[EMAIL] Sent {email_type} to {recipient} | Message ID: {provider_message_id} | Report: {report_id}")
+        else:
+            print(f"[EMAIL] Failed to send {email_type} to {recipient} | Error: {error_message}")
+    finally:
+        conn.close()
+
+
+def build_email_html(email_type: str, clinic_name: str, report_url: str) -> str:
+    """Build HTML email template.
+    
+    Args:
+        email_type: "report" or "scan_receipt"
+        clinic_name: Name of the clinic
+        report_url: Full public URL to the report
+    
+    Returns:
+        HTML email content
+    """
+    if email_type == "report":
+        subject = f"Your patient-flow report for {clinic_name}"
+        intro = f"<p style='margin: 0 0 16px; color: #1f2937; font-size: 16px; line-height: 1.5;'>Here's your complete patient-flow analysis for <strong>{clinic_name}</strong>.</p>"
+    else:  # scan_receipt
+        subject = f"Your report is ready: {clinic_name}"
+        intro = f"<p style='margin: 0 0 16px; color: #1f2937; font-size: 16px; line-height: 1.5;'>Your patient-flow scan for <strong>{clinic_name}</strong> is complete.</p>"
+    
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{subject}</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f3f4f6;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color: #f3f4f6; padding: 40px 20px;">
+        <tr>
+            <td align="center">
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="max-width: 600px; background-color: #ffffff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                    <!-- Header -->
+                    <tr>
+                        <td style="padding: 32px 40px; border-bottom: 1px solid #e5e7eb;">
+                            <h1 style="margin: 0; color: #111827; font-size: 24px; font-weight: 700; letter-spacing: -0.5px;">
+                                {APP_NAME}
+                            </h1>
+                            <p style="margin: 4px 0 0; color: #6b7280; font-size: 14px;">
+                                {APP_PRODUCT}
+                            </p>
+                        </td>
+                    </tr>
+                    
+                    <!-- Main Content -->
+                    <tr>
+                        <td style="padding: 32px 40px;">
+                            <h2 style="margin: 0 0 16px; color: #111827; font-size: 20px; font-weight: 600;">
+                                {subject}
+                            </h2>
+                            
+                            {intro}
+                            
+                            <p style="margin: 0 0 24px; color: #1f2937; font-size: 16px; line-height: 1.5;">
+                                View your complete analysis including screenshots, scores, strengths, leaks, and actionable quick wins.
+                            </p>
+                            
+                            <!-- CTA Button -->
+                            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 24px;">
+                                <tr>
+                                    <td style="background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); border-radius: 6px; text-align: center;">
+                                        <a href="{report_url}" target="_blank" style="display: inline-block; padding: 14px 32px; color: #ffffff; text-decoration: none; font-weight: 600; font-size: 16px;">
+                                            View Your Report →
+                                        </a>
+                                    </td>
+                                </tr>
+                            </table>
+                            
+                            <!-- URL Fallback -->
+                            <p style="margin: 0; color: #6b7280; font-size: 14px; line-height: 1.5;">
+                                Or copy and paste this link into your browser:<br>
+                                <a href="{report_url}" target="_blank" style="color: #3b82f6; text-decoration: none; word-break: break-all;">
+                                    {report_url}
+                                </a>
+                            </p>
+                        </td>
+                    </tr>
+                    
+                    <!-- Footer -->
+                    <tr>
+                        <td style="padding: 24px 40px; background-color: #f9fafb; border-top: 1px solid #e5e7eb; border-radius: 0 0 8px 8px;">
+                            <p style="margin: 0 0 8px; color: #6b7280; font-size: 14px; line-height: 1.5;">
+                                Questions or need help? Contact us at <a href="mailto:hello@keyturn.studio" style="color: #3b82f6; text-decoration: none;">hello@keyturn.studio</a>
+                            </p>
+                            <p style="margin: 0; color: #9ca3af; font-size: 12px;">
+                                © {datetime.utcnow().year} {APP_NAME}. All rights reserved.
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>"""
+    
+    return html
+
+
+def send_email_via_resend(recipient: str, subject: str, html_content: str) -> Dict[str, Any]:
+    """Send email using Resend API.
+    
+    Args:
+        recipient: Email address to send to
+        subject: Email subject line
+        html_content: HTML email body
+    
+    Returns:
+        Dict with 'ok' (bool), 'message_id' (str if successful), 'error' (str if failed)
+    """
+    if not RESEND_API_KEY:
+        return {
+            "ok": False,
+            "error": "RESEND_API_KEY not configured"
+        }
+    
+    if resend is None:
+        return {
+            "ok": False,
+            "error": "Resend package not installed"
+        }
+    
+    try:
+        resend.api_key = RESEND_API_KEY
+        
+        params = {
+            "from": EMAIL_FROM,
+            "to": [recipient],
+            "subject": subject,
+            "html": html_content,
+        }
+        
+        response = resend.Emails.send(params)
+        
+        # Resend returns a dict with 'id' on success
+        if response and 'id' in response:
+            return {
+                "ok": True,
+                "message_id": response['id']
+            }
+        else:
+            return {
+                "ok": False,
+                "error": f"Unexpected response from Resend: {response}"
+            }
+    
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e)
+        }
 
 
 # Simple signals
@@ -1067,9 +1332,10 @@ def run_scan(scan_id: str, url: str) -> None:
         )
         conn.commit()
         
-        # Get public_id for event logging
-        row = conn.execute("SELECT public_id FROM scans WHERE id=?", (scan_id,)).fetchone()
+        # Get public_id and email for event logging and email sending
+        row = conn.execute("SELECT public_id, email FROM scans WHERE id=?", (scan_id,)).fetchone()
         public_id = row["public_id"] if row else None
+        scan_email = row["email"] if row else None
         
         # Log scan_completed event
         conn.execute(
@@ -1077,6 +1343,56 @@ def run_scan(scan_id: str, url: str) -> None:
             ("scan_completed", scan_id, public_id, json.dumps({"score": output.get("patient_flow_score_10")}), now_iso()),
         )
         conn.commit()
+        
+        # Send email if user provided one
+        if scan_email and EMAIL_RE.match(scan_email) and public_id:
+            try:
+                # Build full public report URL
+                report_path = f"/report/{slug}-{public_id}"
+                report_url = f"{PUBLIC_BASE_URL}{report_path}"
+                
+                # Build email content
+                subject = f"Your report is ready: {clinic_name}"
+                html_content = build_email_html("scan_receipt", clinic_name, report_url)
+                
+                # Send email
+                result = send_email_via_resend(scan_email, subject, html_content)
+                
+                if result["ok"]:
+                    # Log successful send
+                    log_email_send(
+                        recipient=scan_email,
+                        report_id=public_id,
+                        email_type="scan_receipt",
+                        status="sent",
+                        provider_message_id=result.get("message_id")
+                    )
+                    
+                    # Log event
+                    conn.execute(
+                        "INSERT INTO events (event_type, scan_id, public_id, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
+                        ("email_scan_receipt_sent", scan_id, public_id, json.dumps({"email": scan_email, "message_id": result.get("message_id")}), now_iso()),
+                    )
+                    conn.commit()
+                else:
+                    # Log failed send (but don't fail the scan)
+                    log_email_send(
+                        recipient=scan_email,
+                        report_id=public_id,
+                        email_type="scan_receipt",
+                        status="failed",
+                        error_message=result.get("error")
+                    )
+            except Exception as email_error:
+                # Log but don't fail the scan if email fails
+                print(f"[EMAIL] Failed to send scan completion email to {scan_email}: {email_error}")
+                log_email_send(
+                    recipient=scan_email,
+                    report_id=public_id if public_id else scan_id,
+                    email_type="scan_receipt",
+                    status="failed",
+                    error_message=str(email_error)
+                )
 
     except Exception as e:
         conn.execute(
@@ -1227,7 +1543,7 @@ HOME_HTML_TEMPLATE = """
           </div>
 
           <div>
-            <label>Email (optional, saved for follow-up)</label>
+            <label>Email (optional, we'll email you the report link)</label>
             <input id="email" placeholder="name@clinic.com" />
           </div>
 
@@ -1420,11 +1736,16 @@ def log_event(req: EventRequest):
 
 
 @app.post("/api/email_report")
-def email_report(req: EmailReportRequest):
-    """Send a plain-text email with the report link."""
+def email_report(req: EmailReportRequest, request: Request):
+    """Send an email with the report link."""
     # Validate email
     if not EMAIL_RE.match(req.email):
         raise HTTPException(status_code=422, detail="Invalid email address")
+    
+    # Check rate limit
+    client_ip = request.client.host if request.client else "unknown"
+    if check_email_rate_limit(req.email, "report") or check_email_rate_limit(client_ip, "report"):
+        raise HTTPException(status_code=429, detail="Too many email requests. Please try again in a few minutes.")
     
     # Validate report exists
     conn = db()
@@ -1434,32 +1755,195 @@ def email_report(req: EmailReportRequest):
     if not row:
         raise HTTPException(status_code=404, detail="Report not found")
     
-    # Build report URL
-    # Use the slug if available, otherwise use "scanning"
+    # Check if scan is complete
+    if row["status"] != "done":
+        raise HTTPException(status_code=400, detail="Report is not ready yet. Please wait for the scan to complete.")
+    
+    # Get clinic name from score
+    clinic_name = "Your Clinic"
+    if row["score_json"]:
+        score_data = json.loads(row["score_json"])
+        clinic_name = score_data.get("clinic_name", clinic_name)
+    
+    # Build full public report URL
     db_slug = row["slug"] if row["slug"] else "scanning"
-    report_url = f"/report/{db_slug}-{req.report_id}"
+    report_path = f"/report/{db_slug}-{req.report_id}"
+    report_url = f"{PUBLIC_BASE_URL}{report_path}"
     
-    # For now, we'll just log this action since we don't have an email service configured
-    # In a production environment, you would integrate with an email service like SendGrid, AWS SES, etc.
+    # Build email content
+    subject = f"Your patient-flow report for {clinic_name}"
+    html_content = build_email_html("report", clinic_name, report_url)
     
-    # Log the email_report event
-    conn = db()
-    try:
-        conn.execute(
-            "INSERT INTO events (event_type, scan_id, public_id, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
-            ("email_report_requested", row["id"], req.report_id, json.dumps({"email": req.email, "report_url": report_url}), now_iso()),
+    # Send email
+    result = send_email_via_resend(req.email, subject, html_content)
+    
+    if result["ok"]:
+        # Log successful send
+        log_email_send(
+            recipient=req.email,
+            report_id=req.report_id,
+            email_type="report",
+            status="sent",
+            provider_message_id=result.get("message_id")
         )
-        conn.commit()
-    finally:
-        conn.close()
+        
+        # Log rate limit
+        log_email_rate_limit(req.email, "report")
+        log_email_rate_limit(client_ip, "report")
+        
+        # Log event
+        conn = db()
+        try:
+            conn.execute(
+                "INSERT INTO events (event_type, scan_id, public_id, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
+                ("email_report_sent", row["id"], req.report_id, json.dumps({"email": req.email, "message_id": result.get("message_id")}), now_iso()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        
+        return {
+            "ok": True,
+            "message_id": result.get("message_id"),
+            "sent_to": req.email
+        }
+    else:
+        # Log failed send
+        log_email_send(
+            recipient=req.email,
+            report_id=req.report_id,
+            email_type="report",
+            status="failed",
+            error_message=result.get("error")
+        )
+        
+        raise HTTPException(status_code=500, detail=result.get("error", "Failed to send email"))
+
+
+@app.post("/api/email/scan-receipt")
+def email_scan_receipt(req: EmailReportRequest, request: Request):
+    """Send a 'Your report is ready' email after scan completion."""
+    # Validate email
+    if not EMAIL_RE.match(req.email):
+        raise HTTPException(status_code=422, detail="Invalid email address")
     
-    # In production, send email here
-    # For now, return success with a message
-    return {
-        "ok": True,
-        "message": f"Email would be sent to {req.email} with link: {report_url}",
-        "report_url": report_url
-    }
+    # Check rate limit
+    client_ip = request.client.host if request.client else "unknown"
+    if check_email_rate_limit(req.email, "scan_receipt") or check_email_rate_limit(client_ip, "scan_receipt"):
+        raise HTTPException(status_code=429, detail="Too many email requests. Please try again in a few minutes.")
+    
+    # Validate report exists
+    conn = db()
+    row = conn.execute("SELECT * FROM scans WHERE public_id=?", (req.report_id,)).fetchone()
+    conn.close()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Report not found")
+    
+    # Get clinic name from score
+    clinic_name = "Your Clinic"
+    if row["score_json"]:
+        score_data = json.loads(row["score_json"])
+        clinic_name = score_data.get("clinic_name", clinic_name)
+    
+    # Build full public report URL
+    db_slug = row["slug"] if row["slug"] else "scanning"
+    report_path = f"/report/{db_slug}-{req.report_id}"
+    report_url = f"{PUBLIC_BASE_URL}{report_path}"
+    
+    # Build email content
+    subject = f"Your report is ready: {clinic_name}"
+    html_content = build_email_html("scan_receipt", clinic_name, report_url)
+    
+    # Send email
+    result = send_email_via_resend(req.email, subject, html_content)
+    
+    if result["ok"]:
+        # Log successful send
+        log_email_send(
+            recipient=req.email,
+            report_id=req.report_id,
+            email_type="scan_receipt",
+            status="sent",
+            provider_message_id=result.get("message_id")
+        )
+        
+        # Log rate limit
+        log_email_rate_limit(req.email, "scan_receipt")
+        log_email_rate_limit(client_ip, "scan_receipt")
+        
+        # Log event
+        conn = db()
+        try:
+            conn.execute(
+                "INSERT INTO events (event_type, scan_id, public_id, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
+                ("email_scan_receipt_sent", row["id"], req.report_id, json.dumps({"email": req.email, "message_id": result.get("message_id")}), now_iso()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        
+        return {
+            "ok": True,
+            "message_id": result.get("message_id"),
+            "sent_to": req.email
+        }
+    else:
+        # Log failed send
+        log_email_send(
+            recipient=req.email,
+            report_id=req.report_id,
+            email_type="scan_receipt",
+            status="failed",
+            error_message=result.get("error")
+        )
+        
+        raise HTTPException(status_code=500, detail=result.get("error", "Failed to send email"))
+
+
+@app.get("/api/email/test")
+def test_email(to: str = "test@example.com"):
+    """Development-only test route to send a simple test email."""
+    # Only enable in development
+    if SCORING_MODE != "rules" and os.getenv("OPENAI_API_KEY"):
+        # If in production mode (has OpenAI key set), disable test route
+        raise HTTPException(status_code=404, detail="Not found")
+    
+    # Validate email
+    if not EMAIL_RE.match(to):
+        raise HTTPException(status_code=422, detail="Invalid email address")
+    
+    # Build simple test email
+    subject = "Test Email from Keyturn Scanner"
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Test Email</title>
+</head>
+<body style="font-family: sans-serif; padding: 20px; background-color: #f5f5f5;">
+    <div style="max-width: 600px; margin: 0 auto; background-color: white; padding: 30px; border-radius: 8px;">
+        <h1 style="color: #333;">Test Email</h1>
+        <p>This is a test email from the Keyturn Scanner application.</p>
+        <p>If you received this, your email configuration is working correctly!</p>
+        <p style="margin-top: 30px; color: #666; font-size: 14px;">
+            Sent at: {now_iso()}
+        </p>
+    </div>
+</body>
+</html>"""
+    
+    # Send email
+    result = send_email_via_resend(to, subject, html_content)
+    
+    if result["ok"]:
+        return {
+            "ok": True,
+            "message": f"Test email sent to {to}",
+            "message_id": result.get("message_id")
+        }
+    else:
+        raise HTTPException(status_code=500, detail=result.get("error", "Failed to send test email"))
 
 
 REPORT_HTML_TEMPLATE = """
