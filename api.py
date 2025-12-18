@@ -2252,11 +2252,12 @@ def unlock_deep_scan(req: DeepUnlockRequest):
     codes = [c.strip() for c in DEEP_SCAN_CODES.split(",") if c.strip()]
     
     # Use constant-time comparison to prevent timing attacks
+    # Note: We must compare against ALL codes to maintain constant time
     code_valid = False
     for valid_code in codes:
         if constant_time_compare(code, valid_code):
             code_valid = True
-            break
+        # Don't break - continue checking all codes to maintain constant time
     
     if not code_valid:
         raise HTTPException(status_code=404, detail="Invalid code")
@@ -2318,7 +2319,11 @@ def create_scan(req: ScanRequest):
                 raise HTTPException(status_code=402, detail=json.dumps({"error": "DEEP_SCAN_LOCKED"}))
             
             # Check if token has expired
-            expires_at_str = token_row["expires_at"].replace("Z", "")
+            # Parse the ISO format timestamp (handles both with and without 'Z')
+            expires_at_str = token_row["expires_at"]
+            if expires_at_str.endswith('Z'):
+                # Remove 'Z' for fromisoformat compatibility
+                expires_at_str = expires_at_str[:-1]
             expires_at = datetime.fromisoformat(expires_at_str)
             now = datetime.utcnow()
             if now >= expires_at:
