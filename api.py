@@ -323,6 +323,16 @@ def init_db() -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS deep_scan_tokens (
+          token TEXT PRIMARY KEY,
+          domain TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          used_at TEXT
+        )
+        """
+    )
     conn.commit()
     conn.close()
     _ensure_columns()
@@ -2299,8 +2309,10 @@ def unlock_deep_scan(req: DeepUnlockRequest):
         
         if not normalized_domain:
             raise HTTPException(status_code=422, detail="Invalid domain")
-    except Exception:
-        raise HTTPException(status_code=422, detail="Invalid domain")
+    except HTTPException:
+        raise
+    except (ValueError, AttributeError) as e:
+        raise HTTPException(status_code=422, detail="Invalid domain format")
     
     # Check if code exists and is unused
     conn = db()
@@ -2322,6 +2334,13 @@ def unlock_deep_scan(req: DeepUnlockRequest):
         
         # Generate a deep_token (one-time token for this domain)
         deep_token = uuid.uuid4().hex
+        
+        # Store token in database
+        conn.execute(
+            "INSERT INTO deep_scan_tokens (token, domain, created_at, used_at) VALUES (?, ?, ?, NULL)",
+            (deep_token, normalized_domain, now_iso())
+        )
+        conn.commit()
         
         return {
             "ok": True,
@@ -2354,9 +2373,44 @@ def create_scan(req: ScanRequest):
         if not deep_token:
             raise HTTPException(status_code=403, detail="Deep scan requires an unlock code. Please unlock deep scan first.")
         
-        # Validate deep_token format (simple validation - it's a UUID hex)
-        if len(deep_token) != 32:
-            raise HTTPException(status_code=403, detail="Invalid deep scan token")
+        # Validate deep_token against database
+        conn = db()
+        try:
+            # Normalize the domain from the URL
+            try:
+                url_str = str(req.url)
+                parsed = urlparse(url_str if url_str.startswith(('http://', 'https://')) else f"https://{url_str}")
+                normalized_domain = parsed.netloc.replace("www.", "").lower()
+            except Exception:
+                raise HTTPException(status_code=422, detail="Invalid URL format")
+            
+            # Check if token exists and is unused
+            token_row = conn.execute(
+                "SELECT * FROM deep_scan_tokens WHERE token=?",
+                (deep_token,)
+            ).fetchone()
+            
+            if not token_row:
+                raise HTTPException(status_code=403, detail="Invalid deep scan token")
+            
+            if token_row["used_at"]:
+                raise HTTPException(status_code=403, detail="This deep scan token has already been used")
+            
+            # Verify token is for the correct domain
+            if token_row["domain"] != normalized_domain:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"This token is for {token_row['domain']}, but you're trying to scan {normalized_domain}"
+                )
+            
+            # Mark token as used
+            conn.execute(
+                "UPDATE deep_scan_tokens SET used_at=? WHERE token=?",
+                (now_iso(), deep_token)
+            )
+            conn.commit()
+        finally:
+            conn.close()
     
     # Set default max_pages based on mode if not provided
     if max_pages is None:
