@@ -1622,6 +1622,7 @@ REPORT_HTML_TEMPLATE = """
       gap:14px;
       margin-bottom:14px;
     }
+    @media (max-width: 1200px){ .summaryRow{grid-template-columns:1fr 1fr;}}
     @media (max-width: 980px){ .summaryRow{grid-template-columns:1fr;}}
     .screenshotsCard{
       display:flex; flex-direction:column;
@@ -2386,6 +2387,10 @@ function getPublicId() {
 // Helper function to log events
 async function logEvent(eventType, metadata = {}) {
   const publicId = getPublicId();
+  if (!scanId || scanId === "__SCAN_ID__") {
+    console.warn('scanId not initialized, skipping event logging');
+    return;
+  }
   try {
     await fetch('/api/events', {
       method: 'POST',
