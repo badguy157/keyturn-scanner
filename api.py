@@ -31,8 +31,8 @@ from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, HttpUrl, conint
 from playwright.sync_api import sync_playwright
@@ -169,7 +169,19 @@ def _ensure_columns() -> None:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(scans)").fetchall()}
         if "email" not in cols:
             conn.execute("ALTER TABLE scans ADD COLUMN email TEXT")
+        if "public_id" not in cols:
+            conn.execute("ALTER TABLE scans ADD COLUMN public_id TEXT")
+        if "slug" not in cols:
+            conn.execute("ALTER TABLE scans ADD COLUMN slug TEXT")
         conn.commit()
+        
+        # Create UNIQUE index on public_id if it doesn't exist
+        try:
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_public_id ON scans(public_id)")
+            conn.commit()
+        except Exception:
+            # Index might already exist or fail for other reasons
+            pass
     finally:
         conn.close()
 
@@ -185,6 +197,8 @@ def init_db() -> None:
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
           email TEXT,
+          public_id TEXT,
+          slug TEXT,
           evidence_json TEXT,
           score_json TEXT,
           error TEXT
@@ -238,6 +252,33 @@ def _model_to_dict(m: Any) -> Dict[str, Any]:
 
 def now_iso() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+def slugify(name: str) -> str:
+    """Convert a name into a URL-friendly slug.
+    
+    Lowercases, removes non-alphanumeric characters, collapses whitespace/dashes, and trims.
+    Example: "Aurora Aesthetic Clinic" -> "aurora-aesthetic-clinic"
+    """
+    if not name:
+        return ""
+    
+    # Lowercase
+    s = name.lower()
+    
+    # Replace spaces and underscores with dashes
+    s = re.sub(r'[\s_]+', '-', s)
+    
+    # Remove non-alphanumeric characters except dashes
+    s = re.sub(r'[^a-z0-9-]', '', s)
+    
+    # Collapse multiple dashes into one
+    s = re.sub(r'-+', '-', s)
+    
+    # Trim dashes from start and end
+    s = s.strip('-')
+    
+    return s
 
 
 def _ai_ready() -> (bool, str):
@@ -982,9 +1023,20 @@ def run_scan(scan_id: str, url: str) -> None:
         else:
             output = ai_score_patient_flow(str(url), evidence)
 
+        # Generate slug from clinic_name or fallback to domain
+        clinic_name = output.get("clinic_name", "")
+        if clinic_name:
+            slug = slugify(clinic_name)
+        else:
+            # Fallback to domain (minus www)
+            parsed = urlparse(str(url))
+            domain = parsed.netloc.replace("www.", "")
+            slug = slugify(domain)
+        
+        # Update scans with slug before marking as done
         conn.execute(
-            "UPDATE scans SET status=?, updated_at=?, evidence_json=?, score_json=?, error=? WHERE id=?",
-            ("done", now_iso(), json.dumps(evidence), json.dumps(output), None, scan_id),
+            "UPDATE scans SET status=?, updated_at=?, evidence_json=?, score_json=?, error=?, slug=? WHERE id=?",
+            ("done", now_iso(), json.dumps(evidence), json.dumps(output), None, slug, scan_id),
         )
         conn.commit()
 
@@ -1203,7 +1255,7 @@ async function runScan() {
   }
 
   const data = await res.json();
-  window.location.href = '/r/' + data.id;
+  window.location.href = data.report_path;
 }
 </script>
 </body>
@@ -1249,10 +1301,26 @@ def create_scan(req: ScanRequest):
             raise HTTPException(status_code=500, detail=msg)
 
     scan_id = uuid.uuid4().hex
+    
+    # Generate unique 8-char public_id
     conn = db()
+    public_id = None
+    max_attempts = 10
+    for _ in range(max_attempts):
+        candidate = uuid.uuid4().hex[:8]
+        # Check if this public_id already exists
+        existing = conn.execute("SELECT id FROM scans WHERE public_id=?", (candidate,)).fetchone()
+        if not existing:
+            public_id = candidate
+            break
+    
+    if not public_id:
+        conn.close()
+        raise HTTPException(status_code=500, detail="Failed to generate unique public_id")
+    
     conn.execute(
-        "INSERT INTO scans (id, url, status, created_at, updated_at, email) VALUES (?, ?, ?, ?, ?, ?)",
-        (scan_id, str(req.url), "queued", now_iso(), now_iso(), email),
+        "INSERT INTO scans (id, url, status, created_at, updated_at, email, public_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (scan_id, str(req.url), "queued", now_iso(), now_iso(), email, public_id),
     )
     conn.commit()
     conn.close()
@@ -1260,7 +1328,11 @@ def create_scan(req: ScanRequest):
     t = threading.Thread(target=run_scan, args=(scan_id, str(req.url)), daemon=True)
     t.start()
 
-    return {"id": scan_id}
+    return {
+        "id": scan_id,
+        "public_id": public_id,
+        "report_path": f"/report/scanning-{public_id}"
+    }
 
 
 @app.get("/api/scan/{scan_id}")
@@ -2569,6 +2641,65 @@ tick();
 </body>
 </html>
 """.strip()
+
+
+@app.get("/report/{slug_and_id}", response_class=HTMLResponse)
+def report_page_public(slug_and_id: str, request: Request):
+    """Public report route with pretty URLs.
+    
+    Accepts URLs like:
+    - /report/aurora-aesthetic-clinic-a1b2c3d4
+    - /report/scanning-a1b2c3d4
+    - /report/a1b2c3d4 (just the public_id)
+    """
+    # Parse public_id from the slug_and_id
+    # If there's a dash, public_id is everything after the last dash
+    # If no dash, the whole thing is the public_id
+    if '-' in slug_and_id:
+        public_id = slug_and_id.split('-')[-1]
+    else:
+        public_id = slug_and_id
+    
+    # Query database by public_id
+    conn = db()
+    row = conn.execute("SELECT id, slug FROM scans WHERE public_id=?", (public_id,)).fetchone()
+    conn.close()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Report not found")
+    
+    scan_id = row["id"]
+    db_slug = row["slug"]
+    
+    # Build canonical path
+    if db_slug:
+        canonical_slug = db_slug
+    else:
+        canonical_slug = "scanning"
+    
+    canonical_path = f"/report/{canonical_slug}-{public_id}"
+    
+    # Check if the requested path matches canonical
+    requested_path = f"/report/{slug_and_id}"
+    
+    if requested_path != canonical_path:
+        # Build redirect URL with query string if present
+        query_string = str(request.url.query)
+        if query_string:
+            redirect_url = f"{canonical_path}?{query_string}"
+        else:
+            redirect_url = canonical_path
+        return RedirectResponse(url=redirect_url, status_code=301)
+    
+    # Render the report HTML using the internal scan_id
+    html = REPORT_HTML_TEMPLATE
+    html = html.replace("__SCAN_ID__", scan_id)
+    html = html.replace("__APP_NAME__", APP_NAME)
+    html = html.replace("__PRODUCT__", APP_PRODUCT)
+    html = html.replace("__MODE__", SCORING_MODE)
+    html = html.replace("__CTA_TEXT__", PRIMARY_CTA_TEXT)
+    html = html.replace("__CTA_URL__", PRIMARY_CTA_URL)
+    return html
 
 
 @app.get("/r/{scan_id}", response_class=HTMLResponse)
