@@ -90,6 +90,7 @@ ENABLE_TEST_ENDPOINTS = os.getenv("ENABLE_TEST_ENDPOINTS", "false").lower() in (
 
 # Deep scan configuration
 DEEP_SCAN_CODES = os.getenv("DEEP_SCAN_CODES", "").strip()
+KT_ADMIN_TOKEN = os.getenv("KT_ADMIN_TOKEN", "").strip()
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -2272,35 +2273,8 @@ def health():
     }
 
 
-@app.post("/api/unlock-deep")
-def unlock_deep_scan(req: DeepUnlockRequest):
-    """Unlock deep scan by validating an unlock code.
-    
-    Returns a token that expires after 24 hours.
-    """
-    code = req.code.strip()
-    
-    if not code:
-        raise HTTPException(status_code=422, detail="Code is required")
-    
-    # Get all codes from environment and compare using constant-time
-    if not DEEP_SCAN_CODES:
-        raise HTTPException(status_code=404, detail="Invalid code")
-    
-    codes = [c.strip() for c in DEEP_SCAN_CODES.split(",") if c.strip()]
-    
-    # Use constant-time comparison to prevent timing attacks
-    # Note: We must compare against ALL codes to maintain constant time
-    code_valid = False
-    for valid_code in codes:
-        if constant_time_compare(code, valid_code):
-            code_valid = True
-        # Don't break - continue checking all codes to maintain constant time
-    
-    if not code_valid:
-        raise HTTPException(status_code=404, detail="Invalid code")
-    
-    # Generate a token with 24h expiration
+def _generate_deep_scan_token() -> Dict[str, Any]:
+    """Helper function to generate and store a deep scan token."""
     token = uuid.uuid4().hex
     expires_at = (datetime.utcnow() + timedelta(hours=24)).isoformat(timespec="seconds") + "Z"
     
@@ -2320,6 +2294,41 @@ def unlock_deep_scan(req: DeepUnlockRequest):
         "token": token,
         "expires_at": expires_at
     }
+
+
+@app.post("/api/unlock-deep")
+def unlock_deep_scan(req: DeepUnlockRequest):
+    """Unlock deep scan by validating an unlock code.
+    
+    Returns a token that expires after 24 hours.
+    """
+    code = req.code.strip()
+    
+    if not code:
+        raise HTTPException(status_code=422, detail="Code is required")
+    
+    # Check admin token first (before parsing any token format logic)
+    if KT_ADMIN_TOKEN and constant_time_compare(code, KT_ADMIN_TOKEN):
+        return _generate_deep_scan_token()
+    
+    # Get all codes from environment and compare using constant-time
+    if not DEEP_SCAN_CODES:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    
+    codes = [c.strip() for c in DEEP_SCAN_CODES.split(",") if c.strip()]
+    
+    # Use constant-time comparison to prevent timing attacks
+    # Note: We must compare against ALL codes to maintain constant time
+    code_valid = False
+    for valid_code in codes:
+        if constant_time_compare(code, valid_code):
+            code_valid = True
+        # Don't break - continue checking all codes to maintain constant time
+    
+    if not code_valid:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    
+    return _generate_deep_scan_token()
 
 
 @app.post("/api/scan")
