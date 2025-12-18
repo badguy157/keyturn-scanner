@@ -2060,6 +2060,28 @@ HOME_HTML_TEMPLATE = """
 let selectedMode = 'quick';
 let deepToken = null;
 
+// Centralized function to update Run button state
+function updateRunButton() {
+  const scanBtn = document.getElementById('scanBtn');
+  const urlInput = document.getElementById('url');
+  const url = urlInput.value.trim();
+  
+  // Determine if button should be enabled
+  let shouldEnable = false;
+  
+  if (selectedMode === 'quick') {
+    // Quick Scan: only requires valid URL
+    shouldEnable = url.length > 0;
+    scanBtn.textContent = 'Run Quick Scan';
+  } else {
+    // Deep Scan: requires URL + valid deepToken
+    shouldEnable = url.length > 0 && deepToken !== null;
+    scanBtn.textContent = 'Run Deep Scan';
+  }
+  
+  scanBtn.disabled = !shouldEnable;
+}
+
 function selectMode(mode) {
   selectedMode = mode;
   
@@ -2069,16 +2091,12 @@ function selectMode(mode) {
   });
   document.querySelector(`[data-mode="${mode}"]`).classList.add('selected');
   
-  // Update button text and quick hint visibility
-  const scanBtn = document.getElementById('scanBtn');
+  // Update quick hint visibility
   const quickHint = document.getElementById('quickHint');
   
   if (mode === 'quick') {
-    scanBtn.textContent = 'Run Quick Scan';
     quickHint.style.display = 'block';
   } else {
-    scanBtn.textContent = 'Run Deep Scan';
-    scanBtn.disabled = !deepToken;
     quickHint.style.display = 'none';
     
     // Show unlock UI if not unlocked
@@ -2092,6 +2110,9 @@ function selectMode(mode) {
       deepUnlocked.classList.remove('visible');
     }
   }
+  
+  // Update button state
+  updateRunButton();
 }
 
 async function unlockDeep(event) {
@@ -2130,7 +2151,9 @@ async function unlockDeep(event) {
     // Hide unlock UI, show unlocked message
     document.getElementById('deepUnlock').classList.remove('visible');
     document.getElementById('deepUnlocked').classList.add('visible');
-    document.getElementById('scanBtn').disabled = false;
+    
+    // Update button state
+    updateRunButton();
     
     hint.textContent = '';
   } catch (error) {
@@ -2202,6 +2225,21 @@ window.addEventListener('DOMContentLoaded', () => {
     selectMode('deep');
     sessionStorage.removeItem('deepToken');
   }
+  
+  // Add URL input change listener
+  const urlInput = document.getElementById('url');
+  urlInput.addEventListener('input', updateRunButton);
+  
+  // Add deep code input listener (for Enter key)
+  const deepCodeInput = document.getElementById('deepCode');
+  deepCodeInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      unlockDeep(e);
+    }
+  });
+  
+  // Initial button state update
+  updateRunButton();
 });
 </script>
 </body>
