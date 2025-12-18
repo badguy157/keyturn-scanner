@@ -2750,7 +2750,6 @@ def report_page_public(slug_and_id: str, request: Request):
     evidence_json = row["evidence_json"]
     
     if score_json:
-        import json
         score = json.loads(score_json)
         clinic_name = score.get("clinic_name", "").strip()
         patient_flow_score = score.get("patient_flow_score_10", 0)
@@ -2777,7 +2776,6 @@ def report_page_public(slug_and_id: str, request: Request):
     # Determine og:image
     og_image = f"{base_url}/android-chrome-512x512.png"  # Default fallback
     if evidence_json:
-        import json
         evidence = json.loads(evidence_json)
         home_desktop = evidence.get("home_desktop", {})
         screenshot_urls = home_desktop.get("screenshot_urls", [])
@@ -2828,7 +2826,7 @@ def report_page(scan_id: str, request: Request):
         if db_slug:
             canonical_slug = db_slug
         else:
-            canonical_slug = "report"  # Use "report" instead of "scanning" for legacy scans
+            canonical_slug = "scanning"  # Use "scanning" for consistency
         
         redirect_path = f"/report/{canonical_slug}-{public_id}"
         
@@ -2846,15 +2844,16 @@ def report_page(scan_id: str, request: Request):
     public_id_new = uuid.uuid4().hex[:8]
     conn = db()
     try:
-        # Check uniqueness
-        existing = conn.execute("SELECT id FROM scans WHERE public_id=?", (public_id_new,)).fetchone()
-        if existing:
-            # Collision - try again with a different ID
-            for _ in range(MAX_PUBLIC_ID_ATTEMPTS - 1):
+        # Check uniqueness and retry if needed
+        for attempt in range(MAX_PUBLIC_ID_ATTEMPTS):
+            existing = conn.execute("SELECT id FROM scans WHERE public_id=?", (public_id_new,)).fetchone()
+            if not existing:
+                break
+            if attempt < MAX_PUBLIC_ID_ATTEMPTS - 1:
                 public_id_new = uuid.uuid4().hex[:8]
-                existing = conn.execute("SELECT id FROM scans WHERE public_id=?", (public_id_new,)).fetchone()
-                if not existing:
-                    break
+            else:
+                # All attempts failed
+                raise HTTPException(status_code=500, detail="Failed to generate unique public_id for legacy scan")
         
         # Update the scan with the new public_id
         conn.execute("UPDATE scans SET public_id=? WHERE id=?", (public_id_new, scan_id))
@@ -2863,7 +2862,7 @@ def report_page(scan_id: str, request: Request):
         conn.close()
     
     # Redirect to new format
-    redirect_path = f"/report/report-{public_id_new}"
+    redirect_path = f"/report/scanning-{public_id_new}"
     query_string = str(request.url.query)
     if query_string:
         redirect_url = f"{redirect_path}?{query_string}"
