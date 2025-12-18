@@ -70,6 +70,9 @@ SCORING_MODE = os.getenv("SCORING_MODE", "ai").lower().strip()  # ai | rules
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
+# Constants
+MAX_PUBLIC_ID_ATTEMPTS = 10
+
 RUBRIC_TEXT = """Clinic Patient-Flow Score – Rubric v0.2
 Categories (0–10 each, total 60)
 Final Patient-Flow Score = Total / 6 (0–10 scale)
@@ -179,8 +182,8 @@ def _ensure_columns() -> None:
         try:
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_public_id ON scans(public_id)")
             conn.commit()
-        except Exception:
-            # Index might already exist or fail for other reasons
+        except (sqlite3.IntegrityError, sqlite3.OperationalError):
+            # Index might already exist or fail for expected reasons
             pass
     finally:
         conn.close()
@@ -1305,25 +1308,25 @@ def create_scan(req: ScanRequest):
     # Generate unique 8-char public_id
     conn = db()
     public_id = None
-    max_attempts = 10
-    for _ in range(max_attempts):
-        candidate = uuid.uuid4().hex[:8]
-        # Check if this public_id already exists
-        existing = conn.execute("SELECT id FROM scans WHERE public_id=?", (candidate,)).fetchone()
-        if not existing:
-            public_id = candidate
-            break
-    
-    if not public_id:
+    try:
+        for _ in range(MAX_PUBLIC_ID_ATTEMPTS):
+            candidate = uuid.uuid4().hex[:8]
+            # Check if this public_id already exists
+            existing = conn.execute("SELECT id FROM scans WHERE public_id=?", (candidate,)).fetchone()
+            if not existing:
+                public_id = candidate
+                break
+        
+        if not public_id:
+            raise HTTPException(status_code=500, detail="Failed to generate unique public_id")
+        
+        conn.execute(
+            "INSERT INTO scans (id, url, status, created_at, updated_at, email, public_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (scan_id, str(req.url), "queued", now_iso(), now_iso(), email, public_id),
+        )
+        conn.commit()
+    finally:
         conn.close()
-        raise HTTPException(status_code=500, detail="Failed to generate unique public_id")
-    
-    conn.execute(
-        "INSERT INTO scans (id, url, status, created_at, updated_at, email, public_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (scan_id, str(req.url), "queued", now_iso(), now_iso(), email, public_id),
-    )
-    conn.commit()
-    conn.close()
 
     t = threading.Thread(target=run_scan, args=(scan_id, str(req.url)), daemon=True)
     t.start()
@@ -1363,7 +1366,22 @@ REPORT_HTML_TEMPLATE = """
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Report __SCAN_ID__</title>
+  <title>__PAGE_TITLE__</title>
+  <link rel="canonical" href="__CANONICAL_URL__">
+  
+  <!-- OpenGraph tags -->
+  <meta property="og:title" content="__OG_TITLE__">
+  <meta property="og:description" content="__OG_DESC__">
+  <meta property="og:url" content="__OG_URL__">
+  <meta property="og:image" content="__OG_IMAGE__">
+  <meta property="og:type" content="website">
+  
+  <!-- Twitter Card tags -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="__OG_TITLE__">
+  <meta name="twitter:description" content="__OG_DESC__">
+  <meta name="twitter:image" content="__OG_IMAGE__">
+  
   <link rel="icon" href="/favicon.ico" sizes="any">
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
@@ -1469,6 +1487,23 @@ REPORT_HTML_TEMPLATE = """
       flex-wrap:wrap;
     }
     .headerLeft{display:flex; flex-direction:column; gap:8px; flex:1; min-width:0;}
+    .breadcrumb{
+      font-size:13px;
+      color:var(--muted);
+      margin-bottom:4px;
+    }
+    .breadcrumb a{
+      color:var(--muted);
+      text-decoration:none;
+      transition:color 0.2s;
+    }
+    .breadcrumb a:hover{
+      color:var(--text);
+    }
+    .breadcrumb-sep{
+      margin:0 6px;
+      color:rgba(232,238,252,.4);
+    }
     .h1{margin:0; font-size:28px; letter-spacing:-.35px}
     .meta{display:flex; gap:10px; flex-wrap:wrap; align-items:center; color:var(--muted); font-size:13px}
     .pill{
@@ -1948,6 +1983,11 @@ REPORT_HTML_TEMPLATE = """
 
     <div class="panel headerRow">
       <div class="headerLeft">
+        <div class="breadcrumb">
+          <a href="/">Reports</a>
+          <span class="breadcrumb-sep">/</span>
+          <span id="clinicNameCrumb">Patient-Flow Report</span>
+        </div>
         <div class="h1" id="clinicName">Patient-Flow Report</div>
         <div class="meta">
           <a id="siteUrl" href="#" target="_blank" rel="noopener" class="pill">Website</a>
@@ -2060,14 +2100,15 @@ if (printMode) {
 async function copyReportLink() {
   const btn = document.getElementById('copyLinkBtn');
   const originalText = btn.textContent;
+  const linkToCopy = window.location.origin + window.location.pathname;
   try {
-    await navigator.clipboard.writeText(window.location.href);
+    await navigator.clipboard.writeText(linkToCopy);
     btn.textContent = "Link copied!";
     setTimeout(() => { btn.textContent = originalText; }, 2000);
   } catch (e) {
     // Fallback for browsers that don't support clipboard API
     const ta = document.createElement('textarea');
-    ta.value = window.location.href;
+    ta.value = linkToCopy;
     ta.style.position = 'fixed';
     ta.style.opacity = '0';
     document.body.appendChild(ta);
@@ -2598,6 +2639,7 @@ async function tick() {
   if (score) {
     const clinic = score.clinic_name || "Patient-Flow Report";
     document.getElementById("clinicName").textContent = clinic;
+    document.getElementById("clinicNameCrumb").textContent = clinic;
 
     const url = score.url || data.url || "";
     const a = document.getElementById("siteUrl");
@@ -2662,7 +2704,7 @@ def report_page_public(slug_and_id: str, request: Request):
     
     # Query database by public_id
     conn = db()
-    row = conn.execute("SELECT id, slug FROM scans WHERE public_id=?", (public_id,)).fetchone()
+    row = conn.execute("SELECT * FROM scans WHERE public_id=?", (public_id,)).fetchone()
     conn.close()
     
     if not row:
@@ -2691,6 +2733,62 @@ def report_page_public(slug_and_id: str, request: Request):
             redirect_url = canonical_path
         return RedirectResponse(url=redirect_url, status_code=301)
     
+    # Build absolute URLs using request info
+    # Respect X-Forwarded-Proto if present (for reverse proxies)
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    if forwarded_proto:
+        scheme = forwarded_proto
+    else:
+        scheme = request.url.scheme
+    
+    host = request.headers.get("host") or str(request.url.netloc)
+    base_url = f"{scheme}://{host}"
+    canonical_url = f"{base_url}{canonical_path}"
+    
+    # Parse score_json and evidence_json to compute SEO values
+    score_json = row["score_json"]
+    evidence_json = row["evidence_json"]
+    
+    if score_json:
+        import json
+        score = json.loads(score_json)
+        clinic_name = score.get("clinic_name", "").strip()
+        patient_flow_score = score.get("patient_flow_score_10", 0)
+        band = score.get("band", "").strip()
+        
+        if clinic_name:
+            page_title = f"{clinic_name} - Patient-Flow Report"
+            og_title = f"{clinic_name} - Patient-Flow Score: {patient_flow_score}/10"
+            og_desc = f"{band}. Detailed patient-flow analysis for {clinic_name}."
+        else:
+            page_title = "Patient-Flow Report"
+            og_title = "Patient-Flow Report"
+            og_desc = f"Patient-Flow Score: {patient_flow_score}/10. {band}"
+    else:
+        # Scan in progress - use hostname
+        url_str = row["url"]
+        parsed_url = urlparse(url_str)
+        hostname = parsed_url.netloc.replace("www.", "")
+        
+        page_title = f"{hostname} - Scan in progress"
+        og_title = f"{hostname} - Patient-Flow Scan"
+        og_desc = "Scan in progress. Check back soon for detailed patient-flow analysis."
+    
+    # Determine og:image
+    og_image = f"{base_url}/android-chrome-512x512.png"  # Default fallback
+    if evidence_json:
+        import json
+        evidence = json.loads(evidence_json)
+        home_desktop = evidence.get("home_desktop", {})
+        screenshot_urls = home_desktop.get("screenshot_urls", [])
+        if screenshot_urls and len(screenshot_urls) > 0:
+            # Use first desktop screenshot
+            screenshot_url = screenshot_urls[0]
+            if screenshot_url.startswith("/"):
+                og_image = f"{base_url}{screenshot_url}"
+            else:
+                og_image = screenshot_url
+    
     # Render the report HTML using the internal scan_id
     html = REPORT_HTML_TEMPLATE
     html = html.replace("__SCAN_ID__", scan_id)
@@ -2699,19 +2797,81 @@ def report_page_public(slug_and_id: str, request: Request):
     html = html.replace("__MODE__", SCORING_MODE)
     html = html.replace("__CTA_TEXT__", PRIMARY_CTA_TEXT)
     html = html.replace("__CTA_URL__", PRIMARY_CTA_URL)
+    
+    # Replace SEO placeholders
+    html = html.replace("__PAGE_TITLE__", page_title)
+    html = html.replace("__CANONICAL_URL__", canonical_url)
+    html = html.replace("__OG_TITLE__", og_title)
+    html = html.replace("__OG_DESC__", og_desc)
+    html = html.replace("__OG_URL__", canonical_url)
+    html = html.replace("__OG_IMAGE__", og_image)
+    
     return html
 
 
 @app.get("/r/{scan_id}", response_class=HTMLResponse)
-def report_page(scan_id: str):
-    html = REPORT_HTML_TEMPLATE
-    html = html.replace("__SCAN_ID__", scan_id)
-    html = html.replace("__APP_NAME__", APP_NAME)
-    html = html.replace("__PRODUCT__", APP_PRODUCT)
-    html = html.replace("__MODE__", SCORING_MODE)
-    html = html.replace("__CTA_TEXT__", PRIMARY_CTA_TEXT)
-    html = html.replace("__CTA_URL__", PRIMARY_CTA_URL)
-    return html
+def report_page(scan_id: str, request: Request):
+    """Legacy report route - redirects to new pretty URL format."""
+    # Look up scan by internal id
+    conn = db()
+    row = conn.execute("SELECT * FROM scans WHERE id=?", (scan_id,)).fetchone()
+    conn.close()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    
+    public_id = row["public_id"]
+    
+    # If scan has public_id, redirect to new format
+    if public_id:
+        db_slug = row["slug"]
+        if db_slug:
+            canonical_slug = db_slug
+        else:
+            canonical_slug = "report"  # Use "report" instead of "scanning" for legacy scans
+        
+        redirect_path = f"/report/{canonical_slug}-{public_id}"
+        
+        # Preserve query params
+        query_string = str(request.url.query)
+        if query_string:
+            redirect_url = f"{redirect_path}?{query_string}"
+        else:
+            redirect_url = redirect_path
+        
+        return RedirectResponse(url=redirect_url, status_code=301)
+    
+    # Legacy scan without public_id - generate one and save it
+    # This ensures all scans eventually have public_ids
+    public_id_new = uuid.uuid4().hex[:8]
+    conn = db()
+    try:
+        # Check uniqueness
+        existing = conn.execute("SELECT id FROM scans WHERE public_id=?", (public_id_new,)).fetchone()
+        if existing:
+            # Collision - try again with a different ID
+            for _ in range(MAX_PUBLIC_ID_ATTEMPTS - 1):
+                public_id_new = uuid.uuid4().hex[:8]
+                existing = conn.execute("SELECT id FROM scans WHERE public_id=?", (public_id_new,)).fetchone()
+                if not existing:
+                    break
+        
+        # Update the scan with the new public_id
+        conn.execute("UPDATE scans SET public_id=? WHERE id=?", (public_id_new, scan_id))
+        conn.commit()
+    finally:
+        conn.close()
+    
+    # Redirect to new format
+    redirect_path = f"/report/report-{public_id_new}"
+    query_string = str(request.url.query)
+    if query_string:
+        redirect_url = f"{redirect_path}?{query_string}"
+    else:
+        redirect_url = redirect_path
+    
+    return RedirectResponse(url=redirect_url, status_code=301)
+
 
 
 @app.get("/api/scan/{scan_id}/pdf")
