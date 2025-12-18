@@ -86,6 +86,9 @@ RESEND_FROM = os.getenv("RESEND_FROM", "Keyturn Studio <reports@keyturn.studio>"
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://scan.keyturn.studio").strip()
 ENABLE_TEST_ENDPOINTS = os.getenv("ENABLE_TEST_ENDPOINTS", "false").lower() in ("true", "1", "yes")
 
+# Deep scan configuration
+DEEP_SCAN_CODES = os.getenv("DEEP_SCAN_CODES", "").strip()
+
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 # Constants
@@ -226,6 +229,30 @@ def _ensure_columns() -> None:
         conn.close()
 
 
+def _populate_deep_scan_codes() -> None:
+    """Populate deep_scan_codes table from DEEP_SCAN_CODES environment variable."""
+    if not DEEP_SCAN_CODES:
+        return
+    
+    codes = [code.strip() for code in DEEP_SCAN_CODES.split(",") if code.strip()]
+    if not codes:
+        return
+    
+    conn = db()
+    try:
+        # Get existing codes from database
+        existing_codes = {row["code"] for row in conn.execute("SELECT code FROM deep_scan_codes").fetchall()}
+        
+        # Insert new codes that don't exist yet
+        for code in codes:
+            if code not in existing_codes:
+                conn.execute("INSERT INTO deep_scan_codes (code, used_at, used_for_domain) VALUES (?, NULL, NULL)", (code,))
+        
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def init_db() -> None:
     conn = db()
     conn.execute(
@@ -287,9 +314,19 @@ def init_db() -> None:
         ON email_rate_limits(identifier, email_type, created_at)
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS deep_scan_codes (
+          code TEXT PRIMARY KEY,
+          used_at TEXT,
+          used_for_domain TEXT
+        )
+        """
+    )
     conn.commit()
     conn.close()
     _ensure_columns()
+    _populate_deep_scan_codes()
 
 
 init_db()
@@ -300,6 +337,12 @@ class ScanRequest(BaseModel):
     email: Optional[str] = None
     mode: Optional[Literal["quick", "deep"]] = "quick"
     max_pages: Optional[int] = None
+    deep_token: Optional[str] = None
+
+
+class DeepUnlockRequest(BaseModel):
+    code: str
+    domain: str
 
 
 class EventRequest(BaseModel):
@@ -1846,7 +1889,72 @@ HOME_HTML_TEMPLATE = """
       cursor:pointer;
     }
     button:hover{filter:brightness(1.06)}
+    button:disabled{opacity:0.5; cursor:not-allowed}
     .hint{color:var(--muted); font-size:13px; margin-top:10px}
+    .scanModes{
+      display:flex; flex-direction:column; gap:10px; margin-bottom:10px;
+    }
+    .modeOption{
+      display:flex; align-items:flex-start; gap:10px; padding:12px;
+      border-radius:14px; border:1px solid rgba(255,255,255,.14);
+      background: rgba(0,0,0,.15); cursor:pointer; transition:all 0.2s;
+    }
+    .modeOption:hover{background: rgba(255,255,255,.06)}
+    .modeOption.selected{
+      border-color: rgba(122,162,255,.55);
+      background: rgba(122,162,255,.10);
+    }
+    .modeRadio{
+      width:18px; height:18px; border-radius:999px;
+      border:2px solid rgba(255,255,255,.30);
+      background: transparent; flex-shrink:0; margin-top:2px;
+      display:flex; align-items:center; justify-content:center;
+    }
+    .modeOption.selected .modeRadio{
+      border-color: rgba(122,162,255,.85);
+    }
+    .modeOption.selected .modeRadio::after{
+      content:''; width:10px; height:10px; border-radius:999px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+    }
+    .modeContent{flex:1}
+    .modeTitle{font-weight:700; margin-bottom:4px; display:flex; align-items:center; gap:8px}
+    .modeBadge{
+      font-size:10px; font-weight:800; padding:2px 8px; border-radius:999px;
+      background: rgba(124,247,195,.22); color: rgba(124,247,195,.95);
+    }
+    .modeDesc{font-size:13px; color:var(--muted)}
+    .deepUnlock{
+      margin-top:8px; padding:10px; border-radius:12px;
+      background: rgba(255,200,100,.08); border:1px solid rgba(255,200,100,.25);
+      display:none;
+    }
+    .deepUnlock.visible{display:block}
+    .deepUnlockLabel{font-size:12px; color:var(--muted); margin-bottom:6px}
+    .deepUnlockRow{display:flex; gap:8px}
+    .deepUnlockInput{
+      flex:1; padding:8px 10px; border-radius:10px;
+      border:1px solid rgba(255,255,255,.14);
+      background: rgba(0,0,0,.22); color:var(--text); outline:none; font-size:13px;
+    }
+    .deepUnlockBtn{
+      padding:8px 14px; border-radius:10px;
+      border:1px solid rgba(255,255,255,.14);
+      background: rgba(255,255,255,.10); color:var(--text);
+      font-weight:700; cursor:pointer; font-size:13px;
+    }
+    .deepUnlockBtn:hover{background: rgba(255,255,255,.16)}
+    .deepUnlockHint{font-size:11px; color:var(--muted); margin-top:6px}
+    .deepUnlocked{
+      margin-top:8px; padding:10px; border-radius:12px;
+      background: rgba(124,247,195,.10); border:1px solid rgba(124,247,195,.30);
+      font-size:12px; color: rgba(124,247,195,.95); display:none;
+    }
+    .deepUnlocked.visible{display:block}
+    .quickHint{
+      font-size:12px; color:rgba(124,247,195,.75); margin-top:6px;
+      font-style:italic;
+    }
     .list{display:grid; gap:10px; margin-top:6px;}
     .item{
       display:flex; gap:10px; align-items:flex-start;
@@ -1890,11 +1998,47 @@ HOME_HTML_TEMPLATE = """
           </div>
 
           <div>
+            <label>Choose scan type</label>
+            <div class="scanModes">
+              <div class="modeOption selected" data-mode="quick" onclick="selectMode('quick')">
+                <div class="modeRadio"></div>
+                <div class="modeContent">
+                  <div class="modeTitle">
+                    Quick Scan
+                    <span class="modeBadge">FREE</span>
+                  </div>
+                  <div class="modeDesc">1 page, ~60 sec</div>
+                </div>
+              </div>
+              
+              <div class="modeOption" data-mode="deep" onclick="selectMode('deep')">
+                <div class="modeRadio"></div>
+                <div class="modeContent">
+                  <div class="modeTitle">Deep Scan</div>
+                  <div class="modeDesc">6–10 pages, ~3–5 min</div>
+                  <div class="deepUnlock" id="deepUnlock">
+                    <div class="deepUnlockLabel">Enter unlock code:</div>
+                    <div class="deepUnlockRow">
+                      <input class="deepUnlockInput" id="deepCode" placeholder="XXXXX-XXXXX" />
+                      <button class="deepUnlockBtn" onclick="unlockDeep(event)">Unlock</button>
+                    </div>
+                    <div class="deepUnlockHint" id="deepUnlockHint"></div>
+                  </div>
+                  <div class="deepUnlocked" id="deepUnlocked">
+                    ✓ Deep scan unlocked for this domain
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="quickHint" id="quickHint">Want the full breakdown? Run a Deep Scan.</div>
+          </div>
+
+          <div>
             <label>Email (optional, we'll email you the report link)</label>
             <input id="email" placeholder="name@clinic.com" />
           </div>
 
-          <button onclick="runScan()">Run free scan</button>
+          <button id="scanBtn" onclick="runScan()">Run Quick Scan</button>
           <div class="hint" id="hint"></div>
           <div class="fine">Tip: use the homepage URL. The scan is best effort and may miss screenshots on heavily protected sites.</div>
         </div>
@@ -1933,6 +2077,105 @@ HOME_HTML_TEMPLATE = """
   </div>
 
 <script>
+let selectedMode = 'quick';
+let deepToken = null;
+
+function selectMode(mode) {
+  selectedMode = mode;
+  
+  // Update UI
+  document.querySelectorAll('.modeOption').forEach(opt => {
+    opt.classList.remove('selected');
+  });
+  document.querySelector(`[data-mode="${mode}"]`).classList.add('selected');
+  
+  // Update button text and quick hint visibility
+  const scanBtn = document.getElementById('scanBtn');
+  const quickHint = document.getElementById('quickHint');
+  
+  if (mode === 'quick') {
+    scanBtn.textContent = 'Run Quick Scan';
+    quickHint.style.display = 'block';
+  } else {
+    scanBtn.textContent = 'Run Deep Scan';
+    scanBtn.disabled = !deepToken;
+    quickHint.style.display = 'none';
+    
+    // Show unlock UI if not unlocked
+    const deepUnlock = document.getElementById('deepUnlock');
+    const deepUnlocked = document.getElementById('deepUnlocked');
+    if (deepToken) {
+      deepUnlock.classList.remove('visible');
+      deepUnlocked.classList.add('visible');
+    } else {
+      deepUnlock.classList.add('visible');
+      deepUnlocked.classList.remove('visible');
+    }
+  }
+}
+
+async function unlockDeep(event) {
+  event.stopPropagation();
+  
+  const codeInput = document.getElementById('deepCode');
+  const urlInput = document.getElementById('url');
+  const hint = document.getElementById('deepUnlockHint');
+  const code = codeInput.value.trim();
+  const url = urlInput.value.trim();
+  
+  if (!url) {
+    hint.textContent = 'Please enter a website URL first';
+    hint.style.color = 'rgba(255, 200, 200, .95)';
+    return;
+  }
+  
+  if (!code) {
+    hint.textContent = 'Please enter an unlock code';
+    hint.style.color = 'rgba(255, 200, 200, .95)';
+    return;
+  }
+  
+  hint.textContent = 'Validating...';
+  hint.style.color = 'var(--muted)';
+  
+  try {
+    // Extract domain from URL
+    let domain = url;
+    try {
+      const urlObj = new URL(url.startsWith('http') ? url : 'https://' + url);
+      domain = urlObj.hostname;
+    } catch (e) {
+      // If URL parsing fails, use the raw value
+    }
+    
+    const res = await fetch('/api/deep/unlock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, domain })
+    });
+    
+    if (!res.ok) {
+      const errorData = await res.json();
+      hint.textContent = errorData.detail || 'Invalid code';
+      hint.style.color = 'rgba(255, 200, 200, .95)';
+      return;
+    }
+    
+    const data = await res.json();
+    deepToken = data.deep_token;
+    
+    // Hide unlock UI, show unlocked message
+    document.getElementById('deepUnlock').classList.remove('visible');
+    document.getElementById('deepUnlocked').classList.add('visible');
+    document.getElementById('scanBtn').disabled = false;
+    
+    hint.textContent = '';
+  } catch (error) {
+    hint.textContent = 'Network error';
+    hint.style.color = 'rgba(255, 200, 200, .95)';
+  }
+}
+
 async function runScan() {
   const url = document.getElementById('url').value.trim();
   const email = document.getElementById('email').value.trim();
@@ -1942,22 +2185,61 @@ async function runScan() {
     hint.textContent = "Paste a URL first.";
     return;
   }
+  
+  if (selectedMode === 'deep' && !deepToken) {
+    hint.textContent = "Please unlock deep scan first.";
+    return;
+  }
 
   hint.textContent = "Starting scan...";
+  
+  const payload = {
+    url,
+    email: email || null,
+    mode: selectedMode
+  };
+  
+  if (selectedMode === 'deep' && deepToken) {
+    payload.deep_token = deepToken;
+  }
+  
   const res = await fetch('/api/scan', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url, email: email || null })
+    body: JSON.stringify(payload)
   });
 
   if (!res.ok) {
-    hint.textContent = "Error: " + (await res.text());
+    const errorText = await res.text();
+    try {
+      const errorData = JSON.parse(errorText);
+      hint.textContent = "Error: " + (errorData.detail || errorText);
+    } catch (e) {
+      hint.textContent = "Error: " + errorText;
+    }
     return;
   }
 
   const data = await res.json();
   window.location.href = data.report_path;
 }
+
+// On page load, check for prefilled data from sessionStorage
+window.addEventListener('DOMContentLoaded', () => {
+  const prefillUrl = sessionStorage.getItem('prefillUrl');
+  const storedDeepToken = sessionStorage.getItem('deepToken');
+  
+  if (prefillUrl) {
+    document.getElementById('url').value = prefillUrl;
+    sessionStorage.removeItem('prefillUrl');
+  }
+  
+  if (storedDeepToken) {
+    deepToken = storedDeepToken;
+    selectMode('deep');
+    sessionStorage.removeItem('deepToken');
+  }
+});
 </script>
 </body>
 </html>
@@ -1989,6 +2271,67 @@ def health():
     }
 
 
+@app.post("/api/deep/unlock")
+def unlock_deep_scan(req: DeepUnlockRequest):
+    """Unlock deep scan by validating an unlock code.
+    
+    Returns a deep_token that can be used for one deep scan of the specified domain.
+    """
+    code = req.code.strip()
+    domain = req.domain.strip().lower()
+    
+    if not code:
+        raise HTTPException(status_code=422, detail="Code is required")
+    
+    if not domain:
+        raise HTTPException(status_code=422, detail="Domain is required")
+    
+    # Normalize domain (remove www. prefix, protocol, path, etc.)
+    try:
+        # If domain doesn't have a protocol, add one for parsing
+        if not domain.startswith(('http://', 'https://')):
+            domain_to_parse = f"https://{domain}"
+        else:
+            domain_to_parse = domain
+        
+        parsed = urlparse(domain_to_parse)
+        normalized_domain = parsed.netloc.replace("www.", "").lower()
+        
+        if not normalized_domain:
+            raise HTTPException(status_code=422, detail="Invalid domain")
+    except Exception:
+        raise HTTPException(status_code=422, detail="Invalid domain")
+    
+    # Check if code exists and is unused
+    conn = db()
+    try:
+        row = conn.execute("SELECT * FROM deep_scan_codes WHERE code=?", (code,)).fetchone()
+        
+        if not row:
+            raise HTTPException(status_code=404, detail="Invalid unlock code")
+        
+        if row["used_at"]:
+            raise HTTPException(status_code=409, detail="This code has already been used")
+        
+        # Mark code as used
+        conn.execute(
+            "UPDATE deep_scan_codes SET used_at=?, used_for_domain=? WHERE code=?",
+            (now_iso(), normalized_domain, code)
+        )
+        conn.commit()
+        
+        # Generate a deep_token (one-time token for this domain)
+        deep_token = uuid.uuid4().hex
+        
+        return {
+            "ok": True,
+            "deep_token": deep_token,
+            "domain": normalized_domain,
+        }
+    finally:
+        conn.close()
+
+
 @app.post("/api/scan")
 def create_scan(req: ScanRequest):
     email = (req.email or "").strip() or None
@@ -2004,6 +2347,16 @@ def create_scan(req: ScanRequest):
     # Get mode and max_pages from request (mode defaults to "quick" via Pydantic)
     mode = req.mode
     max_pages = req.max_pages
+    deep_token = req.deep_token
+    
+    # Deep scan gating: require deep_token for deep mode
+    if mode == "deep":
+        if not deep_token:
+            raise HTTPException(status_code=403, detail="Deep scan requires an unlock code. Please unlock deep scan first.")
+        
+        # Validate deep_token format (simple validation - it's a UUID hex)
+        if len(deep_token) != 32:
+            raise HTTPException(status_code=403, detail="Invalid deep scan token")
     
     # Set default max_pages based on mode if not provided
     if max_pages is None:
@@ -2870,6 +3223,121 @@ REPORT_HTML_TEMPLATE = """
       flex-shrink:0;
       margin-top:2px;
     }
+    
+    /* Deep Scan Upsell Card */
+    .deepScanCard{
+      display:none;
+      flex-direction:column;
+      gap:16px;
+    }
+    .deepScanCard.visible{
+      display:flex;
+    }
+    .deepScanCard h2{
+      margin:0 0 8px;
+      font-size:18px;
+      letter-spacing:-.2px;
+      color:var(--text);
+    }
+    .deepScanIntro{
+      font-size:14px;
+      color:var(--muted);
+      line-height:1.5;
+      margin-bottom:8px;
+    }
+    .deepScanBullets{
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+      margin-bottom:12px;
+    }
+    .deepScanBullet{
+      display:flex;
+      gap:12px;
+      align-items:flex-start;
+      font-size:14px;
+      line-height:1.5;
+      color:rgba(232,238,252,.88);
+    }
+    .deepScanBullet::before{
+      content:'→';
+      color:rgba(122,162,255,.92);
+      font-weight:900;
+      font-size:16px;
+      flex-shrink:0;
+      margin-top:2px;
+    }
+    .deepScanCTA{
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:12px 18px;
+      border-radius:14px;
+      border:2px solid rgba(122,162,255,.45);
+      background:linear-gradient(135deg, rgba(122,162,255,.35), rgba(124,247,195,.20));
+      color:var(--text);
+      font-weight:800;
+      font-size:15px;
+      cursor:pointer;
+      text-decoration:none;
+      transition:all 0.2s;
+      box-shadow: 0 10px 30px rgba(0,0,0,.35);
+    }
+    .deepScanCTA:hover{
+      background:linear-gradient(135deg, rgba(122,162,255,.45), rgba(124,247,195,.28));
+      border-color:rgba(122,162,255,.60);
+      filter:brightness(1.10);
+      transform:translateY(-1px);
+    }
+    .deepScanUnlockUI{
+      margin-top:8px;
+      padding:12px;
+      border-radius:12px;
+      background:rgba(122,162,255,.08);
+      border:1px solid rgba(122,162,255,.25);
+    }
+    .deepScanUnlockLabel{
+      font-size:12px;
+      color:var(--muted);
+      margin-bottom:8px;
+    }
+    .deepScanUnlockRow{
+      display:flex;
+      gap:8px;
+    }
+    .deepScanUnlockInput{
+      flex:1;
+      padding:10px 12px;
+      border-radius:12px;
+      border:1px solid rgba(255,255,255,.14);
+      background:rgba(0,0,0,.22);
+      color:var(--text);
+      outline:none;
+      font-size:14px;
+    }
+    .deepScanUnlockInput:focus{
+      border-color:rgba(122,162,255,.55);
+      box-shadow:0 0 0 4px rgba(122,162,255,.12);
+    }
+    .deepScanUnlockBtn{
+      padding:10px 16px;
+      border-radius:12px;
+      border:1px solid rgba(255,255,255,.14);
+      background:rgba(255,255,255,.10);
+      color:var(--text);
+      font-weight:700;
+      cursor:pointer;
+      font-size:14px;
+    }
+    .deepScanUnlockBtn:hover{
+      background:rgba(255,255,255,.16);
+    }
+    .deepScanUnlockHint{
+      font-size:12px;
+      color:var(--muted);
+      margin-top:8px;
+    }
+    
     .blueprintPrice{
       display:flex;
       align-items:baseline;
@@ -3141,6 +3609,25 @@ REPORT_HTML_TEMPLATE = """
           <div class="thumbGrid" id="mobileGrid"></div>
         </div>
         <div id="errs"></div>
+      </div>
+      <div class="panel deepScanCard" id="deepScanCard">
+        <h2>Want the full Deep Scan?</h2>
+        <p class="deepScanIntro">Quick Scan gives you a baseline. Deep Scan reveals the full picture:</p>
+        <div class="deepScanBullets">
+          <div class="deepScanBullet">Scans pricing, services, booking path pages</div>
+          <div class="deepScanBullet">Analyzes trust pages, testimonials, credentials</div>
+          <div class="deepScanBullet">Full mobile optimization assessment</div>
+          <div class="deepScanBullet">6–10 pages analyzed (~3–5 min scan)</div>
+        </div>
+        <a class="deepScanCTA" href="/" id="deepScanCTA">Unlock Deep Scan</a>
+        <div class="deepScanUnlockUI" id="deepScanUnlockUI" style="display:none">
+          <div class="deepScanUnlockLabel">Enter your unlock code:</div>
+          <div class="deepScanUnlockRow">
+            <input class="deepScanUnlockInput" id="deepScanCodeInput" placeholder="XXXXX-XXXXX" />
+            <button class="deepScanUnlockBtn" onclick="unlockDeepFromReport()">Unlock</button>
+          </div>
+          <div class="deepScanUnlockHint" id="deepScanUnlockReportHint"></div>
+        </div>
       </div>
       <div class="panel blueprintCard">
         <h2>Get the Blueprint</h2>
@@ -3878,6 +4365,64 @@ if (blueprintCTA) {
   });
 }
 
+// Deep Scan unlock function for report page
+async function unlockDeepFromReport() {
+  const codeInput = document.getElementById('deepScanCodeInput');
+  const hint = document.getElementById('deepScanUnlockReportHint');
+  const code = codeInput.value.trim();
+  
+  if (!code) {
+    hint.textContent = 'Please enter an unlock code';
+    hint.style.color = 'rgba(255, 200, 200, .95)';
+    return;
+  }
+  
+  hint.textContent = 'Validating...';
+  hint.style.color = 'var(--muted)';
+  
+  try {
+    // Get the current domain from the scan
+    const res = await fetch('/api/scan/' + scanId);
+    const data = await res.json();
+    const scanUrl = data.url || '';
+    
+    let domain = scanUrl;
+    try {
+      const urlObj = new URL(scanUrl.startsWith('http') ? scanUrl : 'https://' + scanUrl);
+      domain = urlObj.hostname;
+    } catch (e) {
+      // If URL parsing fails, use the raw value
+    }
+    
+    const unlockRes = await fetch('/api/deep/unlock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, domain })
+    });
+    
+    if (!unlockRes.ok) {
+      const errorData = await unlockRes.json();
+      hint.textContent = errorData.detail || 'Invalid code';
+      hint.style.color = 'rgba(255, 200, 200, .95)';
+      return;
+    }
+    
+    const unlockData = await unlockRes.json();
+    
+    // Redirect to home page with URL prefilled and deep mode unlocked
+    const deepToken = unlockData.deep_token;
+    // Store in sessionStorage so the home page can use it
+    sessionStorage.setItem('deepToken', deepToken);
+    sessionStorage.setItem('prefillUrl', scanUrl);
+    
+    window.location.href = '/';
+    
+  } catch (error) {
+    hint.textContent = 'Network error';
+    hint.style.color = 'rgba(255, 200, 200, .95)';
+  }
+}
+
 async function tick() {
   const res = await fetch('/api/scan/' + scanId);
   const data = await res.json();
@@ -3885,8 +4430,22 @@ async function tick() {
   const st = data.status || "loading";
   const err = data.error ? (" | " + data.error) : "";
   document.getElementById('status').textContent = "Status: " + statusNice(st) + err;
-
+  
+  // Get scan mode from evidence metadata
   const ev = data.evidence || {};
+  const scanMetadata = ev.scan_metadata || {};
+  const scanMode = scanMetadata.mode || 'quick';
+  
+  // Show/hide deep scan card based on mode
+  const deepScanCard = document.getElementById('deepScanCard');
+  if (deepScanCard) {
+    if (scanMode === 'quick') {
+      deepScanCard.classList.add('visible');
+    } else {
+      deepScanCard.classList.remove('visible');
+    }
+  }
+
   const hd = (ev.home_desktop || {});
   const hm = (ev.home_mobile || {});
 
