@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urljoin, urlparse
 
+import requests
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
@@ -94,6 +95,14 @@ SCAN_STATUS_ERROR = "error"
 SCAN_STATUS_QUEUED = "queued"
 SCAN_STATUS_RUNNING = "running"
 SCAN_STATUS_SCORING = "scoring"
+
+# Scan mode defaults
+DEFAULT_MAX_PAGES_QUICK = 1
+DEFAULT_MAX_PAGES_DEEP = 8
+MAX_PAGES_LIMIT = 50
+
+# User agent for HTTP requests
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
 RUBRIC_TEXT = """Clinic Patient-Flow Score – Rubric v0.2
 Categories (0–10 each, total 60)
@@ -198,6 +207,12 @@ def _ensure_columns() -> None:
             conn.execute("ALTER TABLE scans ADD COLUMN public_id TEXT")
         if "slug" not in cols:
             conn.execute("ALTER TABLE scans ADD COLUMN slug TEXT")
+        if "mode" not in cols:
+            conn.execute("ALTER TABLE scans ADD COLUMN mode TEXT DEFAULT 'quick'")
+        if "max_pages" not in cols:
+            conn.execute("ALTER TABLE scans ADD COLUMN max_pages INTEGER")
+        if "pages_scanned" not in cols:
+            conn.execute("ALTER TABLE scans ADD COLUMN pages_scanned INTEGER")
         conn.commit()
         
         # Create UNIQUE index on public_id if it doesn't exist
@@ -283,6 +298,8 @@ init_db()
 class ScanRequest(BaseModel):
     url: HttpUrl
     email: Optional[str] = None
+    mode: Optional[Literal["quick", "deep"]] = "quick"
+    max_pages: Optional[int] = None
 
 
 class EventRequest(BaseModel):
@@ -358,6 +375,11 @@ def slugify(name: str) -> str:
     s = s.strip('-')
     
     return s
+
+
+def get_default_max_pages(mode: str) -> int:
+    """Get default max_pages for a given mode."""
+    return DEFAULT_MAX_PAGES_QUICK if mode == "quick" else DEFAULT_MAX_PAGES_DEEP
 
 
 def _ai_ready() -> (bool, str):
@@ -631,6 +653,174 @@ MIME_BY_EXT = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
+
+
+# Keywords for URL prioritization (higher score = more likely to contain patient-flow signals)
+PRIORITY_KEYWORDS = {
+    "book": 10,
+    "appointment": 10,
+    "consult": 10,
+    "schedule": 10,
+    "contact": 8,
+    "pricing": 9,
+    "cost": 8,
+    "services": 7,
+    "treatments": 7,
+    "about": 6,
+    "reviews": 7,
+    "testimonials": 7,
+    "locations": 6,
+    "financing": 7,
+    "before-after": 9,
+    "gallery": 7,
+}
+
+# Patterns for URLs to skip
+JUNK_URL_PATTERNS = [
+    r"\.pdf$",
+    r"\.(jpg|jpeg|png|gif|webp|svg|ico)$",
+    r"^mailto:",
+    r"^tel:",
+    r"facebook\.com",
+    r"twitter\.com",
+    r"instagram\.com",
+    r"linkedin\.com",
+    r"youtube\.com",
+    r"tiktok\.com",
+    r"\?.*utm_",  # tracking URLs with many query params
+    r"\?.*fbclid",
+    r"\?.*gclid",
+]
+
+
+def _is_junk_url(url: str) -> bool:
+    """Check if URL should be skipped based on junk patterns."""
+    url_lower = url.lower()
+    for pattern in JUNK_URL_PATTERNS:
+        if re.search(pattern, url_lower):
+            return True
+    return False
+
+
+def _score_url(url: str) -> int:
+    """Score URL based on priority keywords in path."""
+    url_lower = url.lower()
+    score = 0
+    for keyword, weight in PRIORITY_KEYWORDS.items():
+        if keyword in url_lower:
+            score += weight
+    return score
+
+
+def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
+    """Discover and prioritize internal pages to scan.
+    
+    Args:
+        seed_url: The starting URL to crawl
+        max_pages: Maximum number of pages to return
+    
+    Returns:
+        List of URLs to scan. The seed_url is guaranteed to be at index 0.
+        Additional URLs are prioritized by keyword scoring and deduplicated.
+        List length is up to max_pages (minimum 1, always includes seed_url).
+    """
+    print(f"[DISCOVER] Starting discovery for {seed_url}, max_pages={max_pages}")
+    
+    parsed_seed = urlparse(seed_url)
+    seed_hostname = parsed_seed.netloc
+    
+    discovered_urls = set()
+    scored_urls = []
+    
+    try:
+        # Try Playwright first, fallback to requests
+        html = None
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True, args=["--disable-dev-shm-usage", "--no-sandbox"])
+                page = browser.new_page()
+                page.set_default_timeout(15000)
+                page.goto(seed_url, wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(1000)  # Brief wait for dynamic content
+                html = page.content()
+                browser.close()
+        except Exception as pw_err:
+            print(f"[DISCOVER] Playwright failed ({pw_err}), falling back to requests")
+            try:
+                response = requests.get(seed_url, timeout=15, headers={
+                    "User-Agent": USER_AGENT
+                })
+                html = response.text
+            except Exception as req_err:
+                print(f"[DISCOVER] Requests also failed: {req_err}")
+                # Return just the seed URL if we can't fetch anything
+                return [seed_url]
+        
+        if not html:
+            print("[DISCOVER] No HTML retrieved, returning seed URL only")
+            return [seed_url]
+        
+        # Parse HTML and extract links
+        soup = BeautifulSoup(html, "html.parser")
+        
+        for a_tag in soup.find_all("a", href=True):
+            href = a_tag.get("href", "").strip()
+            if not href or href.startswith("#") or href.lower().startswith("javascript:"):
+                continue
+            
+            # Make absolute URL
+            try:
+                abs_url = urljoin(seed_url, href)
+                parsed = urlparse(abs_url)
+                
+                # Only keep internal links (same hostname)
+                if parsed.netloc != seed_hostname:
+                    continue
+                
+                # Normalize URL (remove fragments)
+                normalized = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+                if parsed.query:
+                    normalized += f"?{parsed.query}"
+                
+                # Skip junk URLs
+                if _is_junk_url(normalized):
+                    continue
+                
+                # Add to discovered set
+                if normalized not in discovered_urls:
+                    discovered_urls.add(normalized)
+                    score = _score_url(normalized)
+                    scored_urls.append((score, normalized))
+            
+            except Exception:
+                continue
+        
+        # Sort by score (highest first)
+        scored_urls.sort(reverse=True, key=lambda x: x[0])
+        
+        # Build result list: seed URL first, then top scored URLs
+        result = [seed_url]
+        for score, url in scored_urls:
+            if url == seed_url:
+                continue  # Don't duplicate seed
+            if len(result) >= max_pages:
+                break
+            result.append(url)
+        
+        # Create a score lookup map for efficient logging
+        score_map = {url: score for score, url in scored_urls}
+        
+        print(f"[DISCOVER] Found {len(discovered_urls)} internal URLs, returning top {len(result)}")
+        for i, url in enumerate(result[:10]):  # Log first 10
+            score = score_map.get(url, 0)
+            print(f"  [{i+1}] (score={score}) {url}")
+        
+        return result
+    
+    except Exception as e:
+        print(f"[DISCOVER] Error during discovery: {e}")
+        # Always return at least the seed URL
+        return [seed_url]
 
 
 def _clean_text(s: str) -> str:
@@ -1290,48 +1480,187 @@ Return output that fits the required JSON schema.
     raise RuntimeError(f"AI scoring failed. Last error: {last_err}")
 
 
-def run_scan(scan_id: str, url: str) -> None:
+def capture_page(url: str, scan_dir: Path, page_index: int = 0) -> Dict[str, Any]:
+    """Capture a single page's evidence (screenshots and HTML data).
+    
+    Args:
+        url: The URL to capture
+        scan_dir: Directory to save screenshots
+        page_index: Index for naming files (0 for home/seed page)
+    
+    Returns:
+        Dictionary with page evidence including desktop and mobile data
+    """
+    prefix = "home" if page_index == 0 else f"page{page_index}"
+    
+    try:
+        desktop_data = fetch_page_evidence(
+            url=url,
+            mobile=False,
+            screenshot_paths=[scan_dir / f"{prefix}_desktop_top.jpg"],
+        )
+    except Exception as e:
+        print(f"[CAPTURE] Desktop capture failed for {url}: {e}")
+        desktop_data = {
+            "page_url": url,
+            "error": str(e),
+            "screenshot_urls": [],
+        }
+    
+    try:
+        mobile_data = fetch_page_evidence(
+            url=url,
+            mobile=True,
+            screenshot_paths=[
+                scan_dir / f"{prefix}_mobile_top.jpg",
+                scan_dir / f"{prefix}_mobile_mid.jpg",
+                scan_dir / f"{prefix}_mobile_bottom.jpg",
+            ],
+        )
+    except Exception as e:
+        print(f"[CAPTURE] Mobile capture failed for {url}: {e}")
+        mobile_data = {
+            "page_url": url,
+            "error": str(e),
+            "screenshot_urls": [],
+        }
+    
+    return {
+        "url": url,
+        "desktop": desktop_data,
+        "mobile": mobile_data,
+    }
+
+
+def analyze_pages(pages: List[Dict[str, Any]], target_url: str) -> Dict[str, Any]:
+    """Analyze captured pages and generate scores.
+    
+    NOTE: Currently, scoring only uses the first page (home/seed URL) evidence.
+    Additional pages are captured and stored in evidence but not yet used for scoring.
+    
+    TODO: Aggregate signals from multiple pages to improve deep mode scoring. This is a
+    known limitation - deep mode will capture multiple pages but they won't affect the
+    score until this enhancement is implemented.
+    
+    Args:
+        pages: List of captured page data (each with desktop/mobile evidence)
+        target_url: The original target URL for the scan
+    
+    Returns:
+        Scoring output dictionary
+    """
+    if not pages:
+        raise RuntimeError("No pages to analyze")
+    
+    home_page = pages[0]
+    
+    evidence: Dict[str, Any] = {
+        "target_url": target_url,
+        "home_desktop": home_page.get("desktop", {}),
+        "home_mobile": home_page.get("mobile", {}),
+    }
+    
+    # Add additional pages to evidence if available
+    # These are stored for future use but not currently factored into scoring
+    if len(pages) > 1:
+        evidence["additional_pages"] = [
+            {
+                "url": p.get("url"),
+                "desktop": p.get("desktop", {}),
+                "mobile": p.get("mobile", {}),
+            }
+            for p in pages[1:]
+        ]
+    
+    if SCORING_MODE == "rules":
+        output = score_rules_only(evidence)
+    else:
+        output = ai_score_patient_flow(target_url, evidence)
+    
+    return output
+
+
+def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[int] = None) -> None:
     conn = db()
     try:
+        # Set default max_pages based on mode
+        if max_pages is None:
+            max_pages = get_default_max_pages(mode)
+        
         conn.execute("UPDATE scans SET status=?, updated_at=? WHERE id=?", (SCAN_STATUS_RUNNING, now_iso(), scan_id))
         conn.commit()
 
         scan_dir = ARTIFACTS_DIR / scan_id
         scan_dir.mkdir(parents=True, exist_ok=True)
 
-        home_desktop = fetch_page_evidence(
-            url=str(url),
-            mobile=False,
-            screenshot_paths=[scan_dir / "home_desktop_top.jpg"],
-        )
-
-        home_mobile = fetch_page_evidence(
-            url=str(url),
-            mobile=True,
-            screenshot_paths=[
-                scan_dir / "home_mobile_top.jpg",
-                scan_dir / "home_mobile_mid.jpg",
-                scan_dir / "home_mobile_bottom.jpg",
-            ],
-        )
-
+        # Discover pages based on mode
+        if mode == "deep":
+            print(f"[SCAN] Deep mode: discovering up to {max_pages} pages")
+            urls_to_scan = discover_site_pages(url, max_pages)
+        else:
+            print(f"[SCAN] Quick mode: scanning seed URL only")
+            urls_to_scan = [url]
+        
+        # Capture all pages
+        captured_pages = []
+        pages_scanned = 0
+        
+        for i, page_url in enumerate(urls_to_scan):
+            try:
+                print(f"[SCAN] Capturing page {i+1}/{len(urls_to_scan)}: {page_url}")
+                page_data = capture_page(page_url, scan_dir, i)
+                captured_pages.append(page_data)
+                pages_scanned += 1
+            except Exception as page_err:
+                print(f"[SCAN] Failed to capture {page_url}: {page_err}")
+                # Record failure but continue with other pages
+                captured_pages.append({
+                    "url": page_url,
+                    "error": str(page_err),
+                    "desktop": {"error": str(page_err)},
+                    "mobile": {"error": str(page_err)},
+                })
+        
+        # Build evidence from captured pages
+        if not captured_pages:
+            raise RuntimeError("No pages were successfully captured")
+        
+        # For compatibility, maintain home_desktop and home_mobile structure
+        home_page = captured_pages[0]
         evidence: Dict[str, Any] = {
             "target_url": str(url),
-            "home_desktop": home_desktop,
-            "home_mobile": home_mobile,
+            "home_desktop": home_page.get("desktop", {}),
+            "home_mobile": home_page.get("mobile", {}),
         }
+        
+        # Add metadata about the scan
+        evidence["scan_metadata"] = {
+            "mode": mode,
+            "max_pages": max_pages,
+            "pages_scanned": pages_scanned,
+            "urls_discovered": len(urls_to_scan),
+        }
+        
+        # Include additional pages if in deep mode
+        if len(captured_pages) > 1:
+            evidence["additional_pages"] = [
+                {
+                    "url": p.get("url"),
+                    "desktop": p.get("desktop", {}),
+                    "mobile": p.get("mobile", {}),
+                }
+                for p in captured_pages[1:]
+            ]
 
         # Save evidence early so the report page can show screenshots while AI is scoring.
         conn.execute(
-            "UPDATE scans SET status=?, updated_at=?, evidence_json=? WHERE id=?",
-            (SCAN_STATUS_SCORING, now_iso(), json.dumps(evidence), scan_id),
+            "UPDATE scans SET status=?, updated_at=?, evidence_json=?, pages_scanned=? WHERE id=?",
+            (SCAN_STATUS_SCORING, now_iso(), json.dumps(evidence), pages_scanned, scan_id),
         )
         conn.commit()
 
-        if SCORING_MODE == "rules":
-            output = score_rules_only(evidence)
-        else:
-            output = ai_score_patient_flow(str(url), evidence)
+        # Score the pages
+        output = analyze_pages(captured_pages, str(url))
 
         # Generate slug from clinic_name or fallback to domain
         clinic_name = output.get("clinic_name", "")
@@ -1343,10 +1672,10 @@ def run_scan(scan_id: str, url: str) -> None:
             domain = parsed.netloc.replace("www.", "")
             slug = slugify(domain)
         
-        # Update scans with slug before marking as done
+        # Update scans with slug and pages_scanned before marking as done
         conn.execute(
-            "UPDATE scans SET status=?, updated_at=?, evidence_json=?, score_json=?, error=?, slug=? WHERE id=?",
-            (SCAN_STATUS_DONE, now_iso(), json.dumps(evidence), json.dumps(output), None, slug, scan_id),
+            "UPDATE scans SET status=?, updated_at=?, evidence_json=?, score_json=?, error=?, slug=?, pages_scanned=? WHERE id=?",
+            (SCAN_STATUS_DONE, now_iso(), json.dumps(evidence), json.dumps(output), None, slug, pages_scanned, scan_id),
         )
         conn.commit()
         
@@ -1358,7 +1687,7 @@ def run_scan(scan_id: str, url: str) -> None:
         # Log scan_completed event
         conn.execute(
             "INSERT INTO events (event_type, scan_id, public_id, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
-            ("scan_completed", scan_id, public_id, json.dumps({"score": output.get("patient_flow_score_10")}), now_iso()),
+            ("scan_completed", scan_id, public_id, json.dumps({"score": output.get("patient_flow_score_10"), "mode": mode, "pages_scanned": pages_scanned}), now_iso()),
         )
         conn.commit()
         
@@ -1672,6 +2001,20 @@ def create_scan(req: ScanRequest):
         if not ok:
             raise HTTPException(status_code=500, detail=msg)
 
+    # Get mode and max_pages from request (mode defaults to "quick" via Pydantic)
+    mode = req.mode
+    max_pages = req.max_pages
+    
+    # Set default max_pages based on mode if not provided
+    if max_pages is None:
+        max_pages = get_default_max_pages(mode)
+    
+    # Validate max_pages
+    if max_pages < 1:
+        raise HTTPException(status_code=422, detail="max_pages must be at least 1")
+    if max_pages > MAX_PAGES_LIMIT:
+        raise HTTPException(status_code=422, detail=f"max_pages cannot exceed {MAX_PAGES_LIMIT}")
+
     scan_id = uuid.uuid4().hex
     
     # Generate unique 8-char public_id
@@ -1690,27 +2033,29 @@ def create_scan(req: ScanRequest):
             raise HTTPException(status_code=500, detail="Failed to generate unique public_id")
         
         conn.execute(
-            "INSERT INTO scans (id, url, status, created_at, updated_at, email, public_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (scan_id, str(req.url), SCAN_STATUS_QUEUED, now_iso(), now_iso(), email, public_id),
+            "INSERT INTO scans (id, url, status, created_at, updated_at, email, public_id, mode, max_pages) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (scan_id, str(req.url), SCAN_STATUS_QUEUED, now_iso(), now_iso(), email, public_id, mode, max_pages),
         )
         conn.commit()
         
         # Log scan_started event
         conn.execute(
             "INSERT INTO events (event_type, scan_id, public_id, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
-            ("scan_started", scan_id, public_id, json.dumps({"url": str(req.url), "email": email}), now_iso()),
+            ("scan_started", scan_id, public_id, json.dumps({"url": str(req.url), "email": email, "mode": mode, "max_pages": max_pages}), now_iso()),
         )
         conn.commit()
     finally:
         conn.close()
 
-    t = threading.Thread(target=run_scan, args=(scan_id, str(req.url)), daemon=True)
+    t = threading.Thread(target=run_scan, args=(scan_id, str(req.url), mode, max_pages), daemon=True)
     t.start()
 
     return {
         "id": scan_id,
         "public_id": public_id,
-        "report_path": f"/report/scanning-{public_id}"
+        "report_path": f"/report/scanning-{public_id}",
+        "mode": mode,
+        "max_pages": max_pages,
     }
 
 

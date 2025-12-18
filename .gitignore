@@ -22,6 +22,7 @@ wheels/
 
 # Database
 *.sqlite
+*.sqlite-journal
 *.db
 
 # Environment

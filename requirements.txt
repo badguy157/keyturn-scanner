@@ -5,3 +5,4 @@ playwright
 openai
 pydantic
 resend
+requests
