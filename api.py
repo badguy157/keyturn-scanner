@@ -124,7 +124,7 @@ def guess_mime(path: str) -> str:
     """Guess MIME type from file path using Python's mimetypes module.
     
     Args:
-        path: File path (can be string or Path object)
+        path: File path as string
     
     Returns:
         MIME type string, defaults to "application/octet-stream" if unknown
@@ -1137,6 +1137,9 @@ def _img_to_data_url(path_str: Optional[str]) -> Optional[str]:
         return None
 
     mime = guess_mime(str(p))
+    # For images, fall back to image/jpeg if MIME type is unknown
+    if mime == "application/octet-stream":
+        mime = "image/jpeg"
     b64 = base64.b64encode(p.read_bytes()).decode("utf-8")
     return f"data:{mime};base64,{b64}"
 
