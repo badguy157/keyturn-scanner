@@ -1805,6 +1805,7 @@ def fetch_page_evidence(
             evidence["screenshot_urls"] = saved_urls
             evidence["screenshot_manifest"] = screenshot_manifest
             evidence["screenshot_errors"] = screenshot_errors
+            evidence["html_content"] = html  # Store raw HTML for deep scan analysis
             if mobile:
                 evidence["mobile_overflow"] = _detect_mobile_overflow(page)
 
@@ -2679,7 +2680,138 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
         )
         conn.commit()
 
-        # Score the pages
+        # Deep scan: perform per-page analysis and synthesis
+        if mode == "deep" and len(captured_pages) > 1:
+            print(f"[SCAN] Deep mode: analyzing {len(captured_pages)} pages individually")
+            
+            page_analyses = []
+            for i, page_data in enumerate(captured_pages):
+                page_url = page_data.get("url", "")
+                desktop_data = page_data.get("desktop", {})
+                mobile_data = page_data.get("mobile", {})
+                
+                # Skip if page had errors during capture
+                if desktop_data.get("error") and mobile_data.get("error"):
+                    print(f"[SCAN] Skipping analysis for {page_url} (capture failed)")
+                    page_analyses.append({
+                        "url": page_url,
+                        "page_type": "unknown",
+                        "summary": "Page capture failed",
+                        "strengths": [],
+                        "leaks": [],
+                        "quick_wins": [],
+                        "notes": {},
+                        "error": desktop_data.get("error"),
+                    })
+                    continue
+                
+                try:
+                    # Get HTML content (prefer desktop, fall back to mobile)
+                    html_content = desktop_data.get("html_content", "") or mobile_data.get("html_content", "")
+                    
+                    # If no HTML, use text sample
+                    if not html_content:
+                        text_sample = desktop_data.get("text_sample", "") or mobile_data.get("text_sample", "")
+                        html_content = f"<html><body>{text_sample}</body></html>"
+                    
+                    # Classify page type from evidence
+                    title = desktop_data.get("title", "") or mobile_data.get("title", "")
+                    h1 = desktop_data.get("h1", "") or mobile_data.get("h1", "")
+                    page_type = _classify_page_type(page_url, "", h1)
+                    
+                    # Extract signals
+                    signals = extract_page_signals(page_url, html_content, page_type)
+                    
+                    # Get screenshot paths
+                    screenshot_desktop = None
+                    screenshot_mobile = None
+                    if desktop_data.get("screenshot_urls"):
+                        screenshot_desktop = desktop_data["screenshot_urls"][0]
+                    if mobile_data.get("screenshot_urls"):
+                        screenshot_mobile = mobile_data["screenshot_urls"][0]
+                    
+                    # Analyze this page
+                    print(f"[SCAN] Analyzing page {i+1}/{len(captured_pages)}: {page_url} ({page_type})")
+                    analysis = analyze_single_page(
+                        page_url=page_url,
+                        page_type=page_type,
+                        html_content=html_content,
+                        screenshot_desktop=screenshot_desktop,
+                        screenshot_mobile=screenshot_mobile,
+                        signals=signals,
+                    )
+                    analysis["url"] = page_url  # Ensure URL is set
+                    page_analyses.append(analysis)
+                    
+                    # Store page analysis in database
+                    conn.execute(
+                        """
+                        INSERT INTO scan_pages 
+                        (scan_id, url, title, page_type, is_mobile, screenshot_paths, extracted_signals, analysis, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            scan_id,
+                            page_url,
+                            title[:200] if title else None,
+                            page_type,
+                            0,  # is_mobile = False for desktop analysis
+                            json.dumps({
+                                "desktop": desktop_data.get("screenshot_urls", []),
+                                "mobile": mobile_data.get("screenshot_urls", []),
+                            }),
+                            json.dumps(signals),
+                            json.dumps(analysis),
+                            now_iso(),
+                        ),
+                    )
+                    conn.commit()
+                    
+                except Exception as page_err:
+                    print(f"[SCAN] Error analyzing {page_url}: {page_err}")
+                    page_analyses.append({
+                        "url": page_url,
+                        "page_type": "unknown",
+                        "summary": f"Analysis error: {str(page_err)}",
+                        "strengths": [],
+                        "leaks": [],
+                        "quick_wins": [],
+                        "notes": {},
+                        "error": str(page_err),
+                    })
+            
+            # Synthesize deep scan results
+            print(f"[SCAN] Synthesizing deep scan results from {len(page_analyses)} page analyses")
+            clinic_name = infer_clinic_name(
+                home_page.get("desktop", {}).get("title", ""),
+                home_page.get("desktop", {}).get("h1", ""),
+                str(url)
+            )
+            
+            synthesis = synthesize_deep_scan(page_analyses, clinic_name)
+            
+            # Store synthesis in database
+            conn.execute(
+                """
+                INSERT INTO scan_summaries 
+                (scan_id, executive_summary, journey_map, action_plan, roadmap_90d, coverage, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scan_id,
+                    json.dumps(synthesis.get("executive_summary", [])),
+                    json.dumps(synthesis.get("journey_map", [])),
+                    json.dumps(synthesis.get("action_plan", [])),
+                    json.dumps(synthesis.get("roadmap_90d", [])),
+                    json.dumps(synthesis.get("coverage", {})),
+                    now_iso(),
+                ),
+            )
+            conn.commit()
+            
+            print(f"[SCAN] Deep scan synthesis complete and stored in database")
+
+        # Score the pages (this provides backward compatibility)
         output = analyze_pages(captured_pages, str(url))
 
         # Generate slug from clinic_name or fallback to domain
