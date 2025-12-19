@@ -116,6 +116,10 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 # Deep scan configuration
 DEEP_SCAN_TEXT_SAMPLE_LIMIT = 500  # Character limit for text samples in deep scan evidence
 
+# Scoring lifecycle configuration
+SCORING_WATCHDOG_TIMEOUT_SECONDS = 300  # 5 minutes - mark scoring as timed out if no update
+ERROR_MESSAGE_MAX_LENGTH = 5000  # Maximum length for error messages stored in database
+
 # Configure mimetypes for better file type detection
 mimetypes.add_type("image/webp", ".webp")
 
@@ -242,6 +246,14 @@ def _ensure_columns() -> None:
             conn.execute("ALTER TABLE scans ADD COLUMN max_pages INTEGER")
         if "pages_scanned" not in cols:
             conn.execute("ALTER TABLE scans ADD COLUMN pages_scanned INTEGER")
+        if "progress_step" not in cols:
+            conn.execute("ALTER TABLE scans ADD COLUMN progress_step TEXT")
+        if "progress_pct" not in cols:
+            conn.execute("ALTER TABLE scans ADD COLUMN progress_pct INTEGER")
+        if "started_at" not in cols:
+            conn.execute("ALTER TABLE scans ADD COLUMN started_at TEXT")
+        if "finished_at" not in cols:
+            conn.execute("ALTER TABLE scans ADD COLUMN finished_at TEXT")
         conn.commit()
         
         # Create UNIQUE index on public_id if it doesn't exist
@@ -2040,7 +2052,14 @@ def ai_score_patient_flow(target_url: str, evidence: Dict[str, Any]) -> Dict[str
     if not ok:
         raise RuntimeError(msg)
 
-    client = OpenAI()  # type: ignore
+    # Initialize OpenAI client with timeout (90s connect, 180s read, 90s write)
+    # These values are chosen to:
+    # - connect=90s: Allow time for connection in slow networks
+    # - read=180s: Long enough for large model responses, but prevent indefinite hangs
+    # - write=90s: Sufficient for uploading screenshots and evidence
+    import httpx
+    timeout = httpx.Timeout(90.0, read=180.0, write=90.0, connect=90.0)
+    client = OpenAI(timeout=timeout)  # type: ignore
 
     home_d = evidence.get("home_desktop", {})
     home_m = evidence.get("home_mobile", {})
@@ -2694,13 +2713,18 @@ def analyze_pages(pages: List[Dict[str, Any]], target_url: str) -> Dict[str, Any
 
 
 def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[int] = None) -> None:
+    import traceback
     conn = db()
     try:
         # Set default max_pages based on mode
         if max_pages is None:
             max_pages = get_default_max_pages(mode)
         
-        conn.execute("UPDATE scans SET status=?, updated_at=? WHERE id=?", (SCAN_STATUS_RUNNING, now_iso(), scan_id))
+        # Set started_at and status=running
+        conn.execute(
+            "UPDATE scans SET status=?, updated_at=?, started_at=?, progress_step=?, progress_pct=? WHERE id=?",
+            (SCAN_STATUS_RUNNING, now_iso(), now_iso(), "capturing_pages", 10, scan_id)
+        )
         conn.commit()
 
         scan_dir = ARTIFACTS_DIR / scan_id
@@ -2766,9 +2790,10 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
             ]
 
         # Save evidence early so the report page can show screenshots while AI is scoring.
+        # Update status to scoring with progress tracking
         conn.execute(
-            "UPDATE scans SET status=?, updated_at=?, evidence_json=?, pages_scanned=? WHERE id=?",
-            (SCAN_STATUS_SCORING, now_iso(), json.dumps(evidence), pages_scanned, scan_id),
+            "UPDATE scans SET status=?, updated_at=?, evidence_json=?, pages_scanned=?, progress_step=?, progress_pct=? WHERE id=?",
+            (SCAN_STATUS_SCORING, now_iso(), json.dumps(evidence), pages_scanned, "calling_model", 60, scan_id),
         )
         conn.commit()
 
@@ -2918,8 +2943,8 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
         
         # Update scans with slug and pages_scanned before marking as done
         conn.execute(
-            "UPDATE scans SET status=?, updated_at=?, evidence_json=?, score_json=?, error=?, slug=?, pages_scanned=? WHERE id=?",
-            (SCAN_STATUS_DONE, now_iso(), json.dumps(evidence), json.dumps(output), None, slug, pages_scanned, scan_id),
+            "UPDATE scans SET status=?, updated_at=?, finished_at=?, evidence_json=?, score_json=?, error=?, slug=?, pages_scanned=?, progress_step=?, progress_pct=? WHERE id=?",
+            (SCAN_STATUS_DONE, now_iso(), now_iso(), json.dumps(evidence), json.dumps(output), None, slug, pages_scanned, "completed", 100, scan_id),
         )
         conn.commit()
         
@@ -2986,13 +3011,30 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                 )
 
     except Exception as e:
+        # Capture full traceback for debugging
+        error_details = f"{repr(e)}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"[SCAN] Error in scan {scan_id}: {error_details}")
+        
         conn.execute(
-            "UPDATE scans SET status=?, updated_at=?, error=? WHERE id=?",
-            (SCAN_STATUS_ERROR, now_iso(), str(e), scan_id),
+            "UPDATE scans SET status=?, updated_at=?, finished_at=?, error=?, progress_step=? WHERE id=?",
+            (SCAN_STATUS_ERROR, now_iso(), now_iso(), error_details[:ERROR_MESSAGE_MAX_LENGTH], "error", scan_id),
         )
         conn.commit()
     finally:
-        conn.close()
+        # Always update updated_at to prevent watchdog false positives
+        # Use separate try/except to handle connection errors gracefully
+        try:
+            conn.execute("UPDATE scans SET updated_at=? WHERE id=?", (now_iso(), scan_id))
+            conn.commit()
+        except (sqlite3.Error, sqlite3.ProgrammingError) as db_err:
+            # Connection might be closed or in error state - safe to ignore
+            print(f"[SCAN] Warning: Could not update final timestamp for {scan_id}: {db_err}")
+        
+        # Always close connection
+        try:
+            conn.close()
+        except Exception:
+            pass  # Connection already closed
 
 
 HOME_HTML_TEMPLATE = """
@@ -3792,6 +3834,34 @@ def get_scan(scan_id: str):
         conn.close()
         raise HTTPException(status_code=404, detail="Scan not found")
 
+    # Watchdog: check if scan is stuck in scoring status
+    status = row["status"]
+    updated_at_str = row["updated_at"]
+    if status == SCAN_STATUS_SCORING and updated_at_str:
+        try:
+            # Parse updated_at timestamp (ISO format with Z suffix)
+            # Remove Z and make it timezone-naive for comparison with utcnow()
+            updated_at = datetime.fromisoformat(updated_at_str.replace("Z", ""))
+            now = datetime.utcnow()
+            age_seconds = (now - updated_at).total_seconds()
+            
+            # If scoring has been running for more than the configured timeout, mark as error
+            if age_seconds > SCORING_WATCHDOG_TIMEOUT_SECONDS:
+                error_msg = f"Scoring timed out (no update for {int(age_seconds)} seconds)"
+                print(f"[WATCHDOG] Marking scan {scan_id} as timed out: {error_msg}")
+                
+                conn.execute(
+                    "UPDATE scans SET status=?, error=?, finished_at=?, updated_at=? WHERE id=?",
+                    (SCAN_STATUS_ERROR, error_msg, now_iso(), now_iso(), scan_id)
+                )
+                conn.commit()
+                
+                # Re-fetch the row to get updated status
+                row = conn.execute("SELECT * FROM scans WHERE id=?", (scan_id,)).fetchone()
+        except Exception as watchdog_err:
+            # Don't fail the request if watchdog fails
+            print(f"[WATCHDOG] Error checking scan timeout: {watchdog_err}")
+
     # Determine entitlements based on scan mode
     mode = row["mode"] if row["mode"] else SCAN_MODE_QUICK
     entitlements = {
@@ -3854,6 +3924,74 @@ def get_scan(scan_id: str):
         "entitlements": entitlements,
         "deep_scan": deep_scan_data,
     }
+    return JSONResponse(resp)
+
+
+@app.get("/api/scan_debug/{scan_id}")
+def get_scan_debug(scan_id: str):
+    """Debug endpoint to check scan progress, status, and recent data.
+    
+    Returns:
+        - status: Current scan status
+        - progress_step: Current progress step (e.g., "calling_model", "completed")
+        - progress_pct: Progress percentage (0-100)
+        - updated_at: Last update timestamp
+        - started_at: When scan started
+        - finished_at: When scan finished (if done/error)
+        - error: Error message if any
+        - report_keys: Most recent keys from report/evidence if present
+    """
+    conn = db()
+    row = conn.execute("SELECT * FROM scans WHERE id=?", (scan_id,)).fetchone()
+    conn.close()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    
+    # Build debug response
+    resp = {
+        "scan_id": row["id"],
+        "status": row["status"],
+        "progress_step": row["progress_step"],
+        "progress_pct": row["progress_pct"],
+        "updated_at": row["updated_at"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "error": row["error"],
+        "mode": row["mode"],
+        "pages_scanned": row["pages_scanned"],
+    }
+    
+    # Add report keys if available
+    report_keys = {}
+    if row["score_json"]:
+        try:
+            score = json.loads(row["score_json"])
+            report_keys["score"] = {
+                "clinic_name": score.get("clinic_name"),
+                "patient_flow_score_10": score.get("patient_flow_score_10"),
+                "band": score.get("band"),
+                "has_summary": "summary" in score,
+                "has_page_critiques": "page_critiques" in score,
+                "page_critiques_count": len(score.get("page_critiques", [])),
+            }
+        except Exception as e:
+            report_keys["score"] = {"error": f"Failed to parse: {str(e)}"}
+    
+    if row["evidence_json"]:
+        try:
+            evidence = json.loads(row["evidence_json"])
+            report_keys["evidence"] = {
+                "has_home_desktop": "home_desktop" in evidence,
+                "has_home_mobile": "home_mobile" in evidence,
+                "has_additional_pages": "additional_pages" in evidence,
+                "additional_pages_count": len(evidence.get("additional_pages", [])),
+            }
+        except Exception as e:
+            report_keys["evidence"] = {"error": f"Failed to parse: {str(e)}"}
+    
+    resp["report_keys"] = report_keys
+    
     return JSONResponse(resp)
 
 
@@ -6544,192 +6682,210 @@ function renderPageCritiques(critiques) {
 }
 
 async function tick() {
-  const res = await fetch('/api/scan/' + scanId);
-  const data = await res.json();
+  let shouldContinuePolling = false;
+  try {
+    const res = await fetch('/api/scan/' + scanId);
+    const data = await res.json();
 
-  const st = data.status || "loading";
-  const err = data.error ? (" | " + data.error) : "";
-  document.getElementById('status').textContent = "Status: " + statusNice(st) + err;
-  
-  // Get entitlements and determine if deep scan is unlocked
-  const entitlements = data.entitlements || {};
-  const isDeliverable = entitlements.deep === true;
-  
-  // Get scan mode from evidence metadata (fallback)
-  const ev = data.evidence || {};
-  const scanMetadata = ev.scan_metadata || {};
-  const scanMode = scanMetadata.mode || 'quick';
-  const pagesScanned = scanMetadata.pages_scanned || 1;
-  
-  // Update pages scanned label
-  const pagesScannedLabel = document.getElementById('pagesScannedLabel');
-  if (pagesScannedLabel && pagesScanned > 1) {
-    pagesScannedLabel.textContent = `(${pagesScanned} pages scanned)`;
-    pagesScannedLabel.style.display = 'inline';
-  }
-  
-  // Update scan mode label
-  const scanModeLabel = document.getElementById('scanModeLabel');
-  if (scanModeLabel) {
-    if (scanMode === 'deep' || pagesScanned > 1) {
-      scanModeLabel.textContent = `Deep Scan (${pagesScanned} pages)`;
-      scanModeLabel.style.background = 'linear-gradient(135deg, rgba(124,247,195,.25), rgba(122,162,255,.20))';
-      scanModeLabel.style.borderColor = 'rgba(124,247,195,.40)';
-      scanModeLabel.style.color = 'rgba(124,247,195,.95)';
+    const st = data.status || "loading";
+    const err = data.error ? (" | " + data.error) : "";
+    document.getElementById('status').textContent = "Status: " + statusNice(st) + err;
+    
+    // Get entitlements and determine if deep scan is unlocked
+    const entitlements = data.entitlements || {};
+    const isDeliverable = entitlements.deep === true;
+    
+    // Get scan mode from evidence metadata (fallback)
+    const ev = data.evidence || {};
+    const scanMetadata = ev.scan_metadata || {};
+    const scanMode = scanMetadata.mode || 'quick';
+    const pagesScanned = scanMetadata.pages_scanned || 1;
+    
+    // Update pages scanned label
+    const pagesScannedLabel = document.getElementById('pagesScannedLabel');
+    if (pagesScannedLabel && pagesScanned > 1) {
+      pagesScannedLabel.textContent = `(${pagesScanned} pages scanned)`;
+      pagesScannedLabel.style.display = 'inline';
+    }
+    
+    // Update scan mode label
+    const scanModeLabel = document.getElementById('scanModeLabel');
+    if (scanModeLabel) {
+      if (scanMode === 'deep' || pagesScanned > 1) {
+        scanModeLabel.textContent = `Deep Scan (${pagesScanned} pages)`;
+        scanModeLabel.style.background = 'linear-gradient(135deg, rgba(124,247,195,.25), rgba(122,162,255,.20))';
+        scanModeLabel.style.borderColor = 'rgba(124,247,195,.40)';
+        scanModeLabel.style.color = 'rgba(124,247,195,.95)';
+      } else {
+        scanModeLabel.textContent = 'Quick Scan';
+      }
+    }
+    
+    // Show/hide UI components based on isDeliverable
+    const deepScanCard = document.getElementById('deepScanCard');
+    const blueprintCard = document.getElementById('blueprintCard');
+    const deepUnlockedBadge = document.getElementById('deepUnlockedBadge');
+    const topBlueprintBtn = document.getElementById('topBlueprintBtn');
+    
+    if (isDeliverable) {
+      // Deep scan is unlocked - hide upsell components
+      if (deepScanCard) deepScanCard.classList.remove('visible');
+      if (blueprintCard) blueprintCard.style.display = 'none';
+      if (deepUnlockedBadge) deepUnlockedBadge.classList.add('visible');
+      if (topBlueprintBtn) topBlueprintBtn.style.display = 'none';
     } else {
-      scanModeLabel.textContent = 'Quick Scan';
-    }
-  }
-  
-  // Show/hide UI components based on isDeliverable
-  const deepScanCard = document.getElementById('deepScanCard');
-  const blueprintCard = document.getElementById('blueprintCard');
-  const deepUnlockedBadge = document.getElementById('deepUnlockedBadge');
-  const topBlueprintBtn = document.getElementById('topBlueprintBtn');
-  
-  if (isDeliverable) {
-    // Deep scan is unlocked - hide upsell components
-    if (deepScanCard) deepScanCard.classList.remove('visible');
-    if (blueprintCard) blueprintCard.style.display = 'none';
-    if (deepUnlockedBadge) deepUnlockedBadge.classList.add('visible');
-    if (topBlueprintBtn) topBlueprintBtn.style.display = 'none';
-  } else {
-    // Quick scan - show upsell components
-    if (deepScanCard && scanMode === 'quick') deepScanCard.classList.add('visible');
-    if (blueprintCard) blueprintCard.style.display = 'flex';
-    if (deepUnlockedBadge) deepUnlockedBadge.classList.remove('visible');
-    if (topBlueprintBtn) topBlueprintBtn.style.display = 'inline-flex';
-  }
-
-  const hd = (ev.home_desktop || {});
-  const hm = (ev.home_mobile || {});
-  
-  // Collect all screenshots including additional pages for deep scans
-  let allManifest = [];
-  allManifest = allManifest.concat(hd.screenshot_manifest || []);
-  allManifest = allManifest.concat(hm.screenshot_manifest || []);
-  
-  // Add screenshots from additional pages if in deep mode
-  const additionalPages = ev.additional_pages || [];
-  if (additionalPages.length > 0) {
-    additionalPages.forEach((page, idx) => {
-      const pageNum = idx + 2; // Page 1 is home, so start at 2
-      addPageScreenshots(allManifest, page.desktop, pageNum);
-      addPageScreenshots(allManifest, page.mobile, pageNum);
-    });
-  }
-
-  const fallbackUrls = []
-    .concat(hd.screenshot_urls || [])
-    .concat(hm.screenshot_urls || []);
-
-  renderImages(allManifest, fallbackUrls);
-
-  const errs = []
-    .concat(hd.screenshot_errors || [])
-    .concat(hm.screenshot_errors || []);
-  renderErrors(errs);
-
-  const score = data.score || null;
-  if (score) {
-    const clinic = score.clinic_name || "Patient-Flow Report";
-    document.getElementById("clinicName").textContent = clinic;
-    document.getElementById("clinicNameCrumb").textContent = clinic;
-
-    const url = score.url || data.url || "";
-    const a = document.getElementById("siteUrl");
-    if (url) { a.href = url; a.textContent = url.replace(/^https?:\/\//,""); }
-
-    document.getElementById("band").textContent = score.band || "—";
-    
-    // Update ScoreboardCard
-    const MAX_SCORE = 60;
-    const total60 = score.total_score_60 ?? 0;
-    const score10 = score.patient_flow_score_10 ?? 0;
-    
-    document.getElementById("score10Main").textContent = (score10 === 0 ? "--" : score10);
-    document.getElementById("score60Main").textContent = (total60 === 0 ? "--" : total60);
-    document.getElementById("verdictChip").textContent = score.band || "—";
-    
-    // Update the radial progress ring
-    const ringEl = document.getElementById("scoreRing");
-    if (ringEl) {
-      const progressPct = (total60 / MAX_SCORE) * 100;
-      ringEl.style.setProperty('--progress', progressPct + '%');
+      // Quick scan - show upsell components
+      if (deepScanCard && scanMode === 'quick') deepScanCard.classList.add('visible');
+      if (blueprintCard) blueprintCard.style.display = 'flex';
+      if (deepUnlockedBadge) deepUnlockedBadge.classList.remove('visible');
+      if (topBlueprintBtn) topBlueprintBtn.style.display = 'inline-flex';
     }
 
-    renderBars(score.scores || {});
-    renderMiniBars(score.scores || {});
+    const hd = (ev.home_desktop || {});
+    const hm = (ev.home_mobile || {});
     
-    // Use detailed versions if available (deep scan), otherwise use legacy format
-    if (score.strengths_detailed && score.strengths_detailed.length) {
-      setList("strengths", score.strengths_detailed);
-    } else {
-      setList("strengths", score.strengths || []);
-    }
+    // Collect all screenshots including additional pages for deep scans
+    let allManifest = [];
+    allManifest = allManifest.concat(hd.screenshot_manifest || []);
+    allManifest = allManifest.concat(hm.screenshot_manifest || []);
     
-    if (score.leaks_detailed && score.leaks_detailed.length) {
-      setList("leaks", score.leaks_detailed);
-    } else {
-      setList("leaks", score.leaks || []);
+    // Add screenshots from additional pages if in deep mode
+    const additionalPages = ev.additional_pages || [];
+    if (additionalPages.length > 0) {
+      additionalPages.forEach((page, idx) => {
+        const pageNum = idx + 2; // Page 1 is home, so start at 2
+        addPageScreenshots(allManifest, page.desktop, pageNum);
+        addPageScreenshots(allManifest, page.mobile, pageNum);
+      });
     }
-    
-    if (score.quick_wins_detailed && score.quick_wins_detailed.length) {
-      setList("quickWins", score.quick_wins_detailed);
-    } else {
-      setList("quickWins", score.quick_wins || []);
-    }
-    
-    // Render deep scan sections if available
-    if (score.summary) {
-      renderDeepSummary(score.summary);
-    }
-    if (score.pages_scanned) {
-      renderPagesScanned(score.pages_scanned);
-    }
-    if (score.cross_page_patterns) {
-      renderCrossPatterns(score.cross_page_patterns);
-    }
-    if (score.page_critiques) {
-      renderPageCritiques(score.page_critiques);
-    }
-  }
-  
-  // Render deep scan data if available
-  const deepScan = data.deep_scan || null;
-  if (deepScan) {
-    // Render executive summary from synthesis
-    if (deepScan.synthesis && deepScan.synthesis.executive_summary) {
-      renderExecutiveSummary(deepScan.synthesis.executive_summary, deepScan.synthesis.what_to_fix_first);
-    }
-    
-    // Render page analyses
-    if (deepScan.pages && deepScan.pages.length > 0) {
-      renderPageAnalyses(deepScan.pages);
-    }
-    
-    // Render journey map
-    if (deepScan.synthesis && deepScan.synthesis.journey_map) {
-      renderJourneyMap(deepScan.synthesis.journey_map);
-    }
-    
-    // Render action plan
-    if (deepScan.synthesis && deepScan.synthesis.action_plan) {
-      renderActionPlan(deepScan.synthesis.action_plan);
-    }
-    
-    // Render 90-day roadmap
-    if (deepScan.synthesis && deepScan.synthesis.roadmap_90d) {
-      renderRoadmap(deepScan.synthesis.roadmap_90d);
-    }
-  }
 
-  if (debug) {
-    document.getElementById('out').textContent = JSON.stringify(score || data, null, 2);
-  }
+    const fallbackUrls = []
+      .concat(hd.screenshot_urls || [])
+      .concat(hm.screenshot_urls || []);
 
-  if (st === 'queued' || st === 'running' || st === 'scoring') {
-    setTimeout(tick, 1200);
+    renderImages(allManifest, fallbackUrls);
+
+    const errs = []
+      .concat(hd.screenshot_errors || [])
+      .concat(hm.screenshot_errors || []);
+    renderErrors(errs);
+
+    const score = data.score || null;
+    if (score) {
+      const clinic = score.clinic_name || "Patient-Flow Report";
+      document.getElementById("clinicName").textContent = clinic;
+      document.getElementById("clinicNameCrumb").textContent = clinic;
+
+      const url = score.url || data.url || "";
+      const a = document.getElementById("siteUrl");
+      if (url) { a.href = url; a.textContent = url.replace(/^https?:\/\//,""); }
+
+      document.getElementById("band").textContent = score.band || "—";
+      
+      // Update ScoreboardCard
+      const MAX_SCORE = 60;
+      const total60 = score.total_score_60 ?? 0;
+      const score10 = score.patient_flow_score_10 ?? 0;
+      
+      document.getElementById("score10Main").textContent = (score10 === 0 ? "--" : score10);
+      document.getElementById("score60Main").textContent = (total60 === 0 ? "--" : total60);
+      document.getElementById("verdictChip").textContent = score.band || "—";
+      
+      // Update the radial progress ring
+      const ringEl = document.getElementById("scoreRing");
+      if (ringEl) {
+        const progressPct = (total60 / MAX_SCORE) * 100;
+        ringEl.style.setProperty('--progress', progressPct + '%');
+      }
+
+      renderBars(score.scores || {});
+      renderMiniBars(score.scores || {});
+      
+      // Use detailed versions if available (deep scan), otherwise use legacy format
+      if (score.strengths_detailed && score.strengths_detailed.length) {
+        setList("strengths", score.strengths_detailed);
+      } else {
+        setList("strengths", score.strengths || []);
+      }
+      
+      if (score.leaks_detailed && score.leaks_detailed.length) {
+        setList("leaks", score.leaks_detailed);
+      } else {
+        setList("leaks", score.leaks || []);
+      }
+      
+      if (score.quick_wins_detailed && score.quick_wins_detailed.length) {
+        setList("quickWins", score.quick_wins_detailed);
+      } else {
+        setList("quickWins", score.quick_wins || []);
+      }
+      
+      // Render deep scan sections if available
+      if (score.summary) {
+        renderDeepSummary(score.summary);
+      }
+      if (score.pages_scanned) {
+        renderPagesScanned(score.pages_scanned);
+      }
+      if (score.cross_page_patterns) {
+        renderCrossPatterns(score.cross_page_patterns);
+      }
+      if (score.page_critiques) {
+        renderPageCritiques(score.page_critiques);
+      }
+    }
+    
+    // Render deep scan data if available
+    const deepScan = data.deep_scan || null;
+    if (deepScan) {
+      // Render executive summary from synthesis
+      if (deepScan.synthesis && deepScan.synthesis.executive_summary) {
+        renderExecutiveSummary(deepScan.synthesis.executive_summary, deepScan.synthesis.what_to_fix_first);
+      }
+      
+      // Render page analyses
+      if (deepScan.pages && deepScan.pages.length > 0) {
+        renderPageAnalyses(deepScan.pages);
+      }
+      
+      // Render journey map
+      if (deepScan.synthesis && deepScan.synthesis.journey_map) {
+        renderJourneyMap(deepScan.synthesis.journey_map);
+      }
+      
+      // Render action plan
+      if (deepScan.synthesis && deepScan.synthesis.action_plan) {
+        renderActionPlan(deepScan.synthesis.action_plan);
+      }
+      
+      // Render 90-day roadmap
+      if (deepScan.synthesis && deepScan.synthesis.roadmap_90d) {
+        renderRoadmap(deepScan.synthesis.roadmap_90d);
+      }
+    }
+
+    if (debug) {
+      document.getElementById('out').textContent = JSON.stringify(score || data, null, 2);
+    }
+
+    // Determine if we should continue polling
+    if (st === 'queued' || st === 'running' || st === 'scoring') {
+      shouldContinuePolling = true;
+    }
+  } catch (error) {
+    // Display error message on fetch/parse failures
+    console.error('[TICK] Error polling scan status:', error);
+    const statusEl = document.getElementById('status');
+    if (statusEl) {
+      statusEl.textContent = "Status: Error | " + (error.message || "Network error");
+    }
+    // Continue polling even after error (with delay)
+    shouldContinuePolling = true;
+  } finally {
+    // Always schedule next tick in finally block so exceptions don't kill polling
+    if (shouldContinuePolling) {
+      setTimeout(tick, 1200);
+    }
   }
 }
 
