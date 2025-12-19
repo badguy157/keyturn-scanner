@@ -39,7 +39,7 @@ from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urljoin, urlparse
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -465,7 +465,7 @@ class PageNotes(BaseModel):
     mobile: Optional[str] = Field(default=None, description="Mobile experience notes")
     speed: Optional[str] = Field(default=None, description="Page speed notes")
     proof: Optional[str] = Field(default=None, description="Proof/social proof notes")
-    copy_messaging: Optional[str] = Field(default=None, description="Copy/messaging notes", alias="copy")
+    copy_messaging: Optional[str] = Field(default=None, description="Copy/messaging notes", alias="messaging")
 
 
 class PageAnalysis(BaseModel):
@@ -1345,7 +1345,6 @@ def trim_html_for_ai(html: str, max_chars: int = 8000) -> str:
             tag.decompose()
         
         # Remove comments (correct BeautifulSoup way)
-        from bs4 import Comment
         for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
             comment.extract()
         
@@ -1385,7 +1384,9 @@ def trim_html_for_ai(html: str, max_chars: int = 8000) -> str:
                 input_summary = []
                 for inp in inputs[:10]:
                     field_name = inp.get("name", inp.get("id", ""))
-                    field_type = inp.get("type", "text") if inp.name == "input" else inp.name
+                    # inp.name is the tag name (e.g., 'input', 'select', 'textarea')
+                    tag_name = inp.name
+                    field_type = inp.get("type", "text") if tag_name == "input" else tag_name
                     if field_name or field_type:
                         input_summary.append(f"{field_name}:{field_type}")
                 parts.append(f"<form>{', '.join(input_summary)}</form>")
