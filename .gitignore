@@ -20,6 +20,11 @@ wheels/
 .installed.cfg
 *.egg
 
+# Temporary test files (exclude from repo)
+test_normalize_page_critiques.py
+test_integration.py
+test_page_critiques.html
+
 # Database
 *.sqlite
 *.sqlite-journal

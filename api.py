@@ -580,6 +580,99 @@ def get_default_max_pages(mode: str) -> int:
     return DEFAULT_MAX_PAGES_QUICK if mode == "quick" else DEFAULT_MAX_PAGES_DEEP
 
 
+def normalize_page_critiques(raw: Any) -> List[Dict[str, Any]]:
+    """Normalize page critique data from the AI model into the expected schema.
+    
+    The UI expects an array named page_critiques where each item has:
+    - page_url (string)
+    - page_title (string, optional)
+    - working (array of strings)
+    - hurting (array of strings)
+    - fixes (array of strings)
+    
+    This function accepts raw page critique data in various shapes and normalizes it.
+    
+    Args:
+        raw: Raw AI model output (dict or list)
+    
+    Returns:
+        List of normalized page critique dicts with keys: page_url, page_title, working, hurting, fixes
+    """
+    if not raw:
+        return []
+    
+    # Extract page critiques from various possible keys
+    pages = None
+    if isinstance(raw, dict):
+        # Try different possible keys for the page critiques array
+        for key in ["page_critiques", "pages", "page_by_page", "page_analysis"]:
+            if key in raw:
+                pages = raw[key]
+                # Handle nested structures like page_analysis.pages
+                if isinstance(pages, dict) and "pages" in pages:
+                    pages = pages["pages"]
+                break
+    elif isinstance(raw, list):
+        # Raw is already a list of pages
+        pages = raw
+    
+    if not pages or not isinstance(pages, list):
+        return []
+    
+    # Define key mappings for each field
+    key_mappings = {
+        "page_url": ["page_url", "url"],
+        "page_title": ["page_title", "title"],
+        "working": ["working", "whats_working", "what_working", "what_worked", "wins", "strengths"],
+        "hurting": ["hurting", "whats_hurting", "what_hurts", "issues", "leaks", "problems"],
+        "fixes": ["fixes", "recommendations", "next_steps", "actions", "suggested_fixes"]
+    }
+    
+    normalized = []
+    for page_item in pages:
+        if not isinstance(page_item, dict):
+            continue
+        
+        # Extract fields using the key mappings
+        def get_field(field_name, default=None):
+            """Get first matching value from key mappings."""
+            for key in key_mappings.get(field_name, []):
+                if key in page_item:
+                    return page_item[key]
+            return default
+        
+        # Extract page_url (required)
+        page_url = get_field("page_url", "")
+        if not page_url:
+            continue  # Skip items without a URL
+        
+        # Extract page_title (optional)
+        page_title = get_field("page_title", "")
+        
+        # Extract arrays and ensure they contain non-empty strings
+        def get_array_field(field_name):
+            """Get array field and filter to non-empty strings."""
+            val = get_field(field_name, [])
+            if isinstance(val, list):
+                return [str(item).strip() for item in val if item and str(item).strip()]
+            return []
+        
+        working = get_array_field("working")
+        hurting = get_array_field("hurting")
+        fixes = get_array_field("fixes")
+        
+        # Add normalized page critique
+        normalized.append({
+            "page_url": str(page_url).strip(),
+            "page_title": str(page_title).strip() if page_title else "",
+            "working": working,
+            "hurting": hurting,
+            "fixes": fixes,
+        })
+    
+    return normalized
+
+
 def _ai_ready() -> (bool, str):
     if SCORING_MODE != "ai":
         return True, ""
@@ -2047,25 +2140,26 @@ Scoring rules:
 DEEP SCAN REQUIREMENTS:
 You MUST provide the following in your response:
 
-1. summary: Executive summary with:
+1. summary (object): Executive summary with:
    - executive_summary: 3-6 bullet points of key findings
    - biggest_booking_leak: The single biggest issue causing lost bookings
    - top_3_fixes: Top 3 recommended fixes in priority order
 
-2. pages_scanned: Array of page details (one per scanned page) with:
+2. pages_scanned (array): Array of page details (one per scanned page) with:
    - url: Full URL of the page
    - title: Page title
-   - type: One of [home, services, treatment, contact, reviews, booking, pricing, other]
+   - type: One of [home, services, treatment, contact, reviews, booking, pricing, about, other]
    - page_score: 0-10 score for this specific page
    - top_issue: The top issue on this page
    - top_fix: The top recommended fix for this page
 
-3. page_critiques: One entry per scanned page with:
-   - page_url: URL of the page
-   - page_title: Title of the page
-   - whats_working: List of 2-4 things working well
-   - whats_hurting: List of 2-4 things hurting conversions
-   - fixes: List of 2-4 specific actionable fixes
+3. page_critiques (array): One entry per scanned page with:
+   - page_url: URL of the page (REQUIRED)
+   - page_title: Title of the page (optional)
+   - whats_working: Array of 2-4 strings describing what's working well (REQUIRED)
+   - whats_hurting: Array of 2-4 strings describing what's hurting conversions (REQUIRED)
+   - fixes: Array of 2-4 specific actionable fixes (REQUIRED)
+   IMPORTANT: Keep each item concise (1-2 sentences max). Do NOT include page HTML or long quotes.
 
 4. cross_page_patterns: Minimum 5 sitewide patterns with:
    - pattern: Description of the pattern
@@ -2231,8 +2325,8 @@ Return output that fits the required JSON schema.
                     out["summary"] = data["summary"]
                 if data.get("pages_scanned"):
                     out["pages_scanned"] = data["pages_scanned"]
-                if data.get("page_critiques"):
-                    out["page_critiques"] = data["page_critiques"]
+                # Normalize page_critiques to ensure consistent schema
+                out["page_critiques"] = normalize_page_critiques(data)
                 if data.get("cross_page_patterns"):
                     out["cross_page_patterns"] = data["cross_page_patterns"]
                 if data.get("strengths_detailed"):
@@ -3761,6 +3855,92 @@ def get_scan(scan_id: str):
         "deep_scan": deep_scan_data,
     }
     return JSONResponse(resp)
+
+
+@app.get("/api/report_json/{scan_id}")
+def get_report_json(scan_id: str):
+    """Debug endpoint to download the final report JSON.
+    
+    Returns the same report object the UI uses (application/json).
+    This is for development/debug only.
+    """
+    conn = db()
+    row = conn.execute("SELECT * FROM scans WHERE id=?", (scan_id,)).fetchone()
+    
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Scan not found")
+    
+    # Build the same response structure as get_scan
+    mode = row["mode"] if row["mode"] else SCAN_MODE_QUICK
+    entitlements = {
+        "deep": mode == SCAN_MODE_DEEP
+    }
+    
+    # Fetch deep scan data if available
+    deep_scan_data = None
+    if mode == SCAN_MODE_DEEP:
+        # Fetch page analyses
+        page_rows = conn.execute(
+            "SELECT * FROM scan_pages WHERE scan_id=? ORDER BY id",
+            (scan_id,)
+        ).fetchall()
+        
+        # Fetch synthesis summary
+        summary_row = conn.execute(
+            "SELECT * FROM scan_summaries WHERE scan_id=?",
+            (scan_id,)
+        ).fetchone()
+        
+        if page_rows or summary_row:
+            deep_scan_data = {}
+            
+            if page_rows:
+                deep_scan_data["pages"] = [
+                    {
+                        "id": r["id"],
+                        "url": r["url"],
+                        "title": r["title"],
+                        "page_type": r["page_type"],
+                        "screenshot_paths": json.loads(r["screenshot_paths"]) if r["screenshot_paths"] else None,
+                        "extracted_signals": json.loads(r["extracted_signals"]) if r["extracted_signals"] else None,
+                        "analysis": json.loads(r["analysis"]) if r["analysis"] else None,
+                    }
+                    for r in page_rows
+                ]
+            
+            if summary_row:
+                deep_scan_data["synthesis"] = {
+                    "executive_summary": json.loads(summary_row["executive_summary"]) if summary_row["executive_summary"] else None,
+                    "journey_map": json.loads(summary_row["journey_map"]) if summary_row["journey_map"] else None,
+                    "action_plan": json.loads(summary_row["action_plan"]) if summary_row["action_plan"] else None,
+                    "roadmap_90d": json.loads(summary_row["roadmap_90d"]) if summary_row["roadmap_90d"] else None,
+                    "coverage": json.loads(summary_row["coverage"]) if summary_row["coverage"] else None,
+                }
+    
+    conn.close()
+    
+    resp = {
+        "id": row["id"],
+        "url": row["url"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "email": row["email"],
+        "error": row["error"],
+        "score": json.loads(row["score_json"]) if row["score_json"] else None,
+        "evidence": json.loads(row["evidence_json"]) if row["evidence_json"] else None,
+        "entitlements": entitlements,
+        "deep_scan": deep_scan_data,
+    }
+    
+    # Return as JSON with proper content type
+    return JSONResponse(
+        content=resp,
+        headers={
+            "Content-Disposition": f'attachment; filename="report_{scan_id}.json"'
+        }
+    )
 
 
 @app.post("/api/events")
@@ -6306,34 +6486,49 @@ function renderPageCritiques(critiques) {
   panel.style.display = 'block';
   
   const html = critiques.map(critique => {
-    const workingHtml = (critique.whats_working && critique.whats_working.length) ?
+    // Map both normalized keys (working/hurting/fixes) and legacy keys (whats_working/whats_hurting)
+    const working = critique.working || critique.whats_working || [];
+    const hurting = critique.hurting || critique.whats_hurting || [];
+    const fixes = critique.fixes || [];
+    
+    const workingHtml = (working && working.length) ?
       `<div class="pageCritiqueSection">
         <div class="pageCritiqueLabel working">What's Working</div>
         <ul class="pageCritiqueList">
-          ${critique.whats_working.map(item => 
+          ${working.map(item => 
             `<li class="pageCritiqueItem working">${esc(item)}</li>`
           ).join('')}
         </ul>
       </div>` : '';
     
-    const hurtingHtml = (critique.whats_hurting && critique.whats_hurting.length) ?
+    const hurtingHtml = (hurting && hurting.length) ?
       `<div class="pageCritiqueSection">
         <div class="pageCritiqueLabel hurting">What's Hurting</div>
         <ul class="pageCritiqueList">
-          ${critique.whats_hurting.map(item => 
+          ${hurting.map(item => 
             `<li class="pageCritiqueItem hurting">${esc(item)}</li>`
           ).join('')}
         </ul>
       </div>` : '';
     
-    const fixesHtml = (critique.fixes && critique.fixes.length) ?
+    const fixesHtml = (fixes && fixes.length) ?
       `<div class="pageCritiqueSection">
         <div class="pageCritiqueLabel fixes">Recommended Fixes</div>
         <ul class="pageCritiqueList">
-          ${critique.fixes.map(item => 
+          ${fixes.map(item => 
             `<li class="pageCritiqueItem fix">${esc(item)}</li>`
           ).join('')}
         </ul>
+      </div>` : '';
+    
+    // Defensive rendering: show debug message if all arrays are empty
+    const hasContent = (working && working.length) || (hurting && hurting.length) || (fixes && fixes.length);
+    const debugHtml = !hasContent ? 
+      `<div class="pageCritiqueSection" style="opacity: 0.6;">
+        <p style="color: var(--muted); font-size: 14px;">No findings captured for this page (debug)</p>
+        <p style="color: var(--muted); font-size: 12px; font-family: monospace;">
+          Keys present: ${Object.keys(critique).join(', ')}
+        </p>
       </div>` : '';
     
     return `<div class="pageCritiqueCard">
@@ -6341,6 +6536,7 @@ function renderPageCritiques(critiques) {
       ${workingHtml}
       ${hurtingHtml}
       ${fixesHtml}
+      ${debugHtml}
     </div>`;
   }).join('');
   
