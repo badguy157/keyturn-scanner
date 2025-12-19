@@ -3023,32 +3023,23 @@ You have analyzed {len(page_analyses)} pages. Your task is to create:
 6. **Coverage Report**: List scanned pages and any missing recommended page types (REQUIRED)
 
 IMPORTANT: You MUST provide ALL sections with the minimum requirements specified above. Be specific and actionable. Cross-reference pages where relevant. Do not leave any section empty.
+
+Return ONLY valid JSON with this exact structure:
+{{
+  "executive_summary": ["bullet 1", "bullet 2", "bullet 3", "bullet 4", "bullet 5"],
+  "what_to_fix_first": "top priority recommendation",
+  "journey_map": [{{ "step": "Land", "pages": ["url"], "friction": ["issue"], "fixes": ["fix"], "risk": "HIGH" }}],
+  "action_plan": [{{ "title": "...", "description": "...", "impact": "HIGH", "effort": "LOW", "page_references": ["url"], "rank": 1 }}],
+  "roadmap_90d": [{{ "phase": "Week 1-2", "focus": "...", "tasks": ["task1", "task2"] }}],
+  "coverage": {{ "scanned_pages": [{{"type": "home", "url": "..."}}], "missing_recommended": ["page_type"] }}
+}}
 """
         
-        # Try structured output
-        try:
-            if hasattr(client, "responses") and hasattr(client.responses, "parse"):
-                response = client.responses.parse(
-                    model=OPENAI_MODEL_FALLBACKS[0],
-                    input=[
-                        {"role": "system", "content": [{"type": "input_text", "text": sys_prompt}]},
-                        {"role": "user", "content": [{"type": "input_text", "text": f"Page Analyses Summary:\n{json.dumps(pages_summary, indent=2)}"}]},
-                    ],
-                    text_format=DeepScanSynthesis,
-                )
-                parsed = getattr(response, "output_parsed", None) or getattr(response, "parsed", None)
-                if parsed is None:
-                    raise RuntimeError("AI returned no parsed output.")
-                data = _model_to_dict(parsed)
-                return data
-        except Exception as e:
-            print(f"[SYNTHESIZE] Structured output error: {e}")
-        
-        # Fallback to JSON mode
+        # Use JSON mode with safe parsing
         response = client.chat.completions.create(
             model=OPENAI_MODEL_FALLBACKS[0],
             messages=[
-                {"role": "system", "content": sys_prompt + "\n\nReturn output as JSON conforming to the DeepScanSynthesis schema."},
+                {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": json.dumps({"pages": pages_summary})},
             ],
             response_format={"type": "json_object"},
@@ -3056,23 +3047,17 @@ IMPORTANT: You MUST provide ALL sections with the minimum requirements specified
         
         content = response.choices[0].message.content or "{}"
         
-        # Try to extract JSON from the response
-        data = _extract_json_from_text(content)
-        if data is None:
-            # If extraction failed, log and return error
-            print(f"[SYNTHESIZE] Failed to extract JSON from response. Raw content: {content[:500]}")
+        # Parse JSON safely with fallback
+        try:
+            data = json.loads(content)
+            return data
+        except json.JSONDecodeError as e:
+            # JSON parsing failed, return error with truncated raw content
+            print(f"[SYNTHESIZE] JSON parsing failed: {e}. Raw content: {content[:500]}")
             return {
-                "executive_summary": ["Failed to parse AI response - raw text received instead of JSON"],
-                "what_to_fix_first": "Unable to generate recommendation due to parsing error",
-                "journey_map": [],
-                "action_plan": [],
-                "roadmap_90d": [],
-                "coverage": {"scanned_pages": [], "missing_recommended": []},
-                "error": "JSON parsing failed",
-                "raw_response": content[:DEEP_SCAN_RAW_RESPONSE_LIMIT],  # Store truncated raw response for debugging
+                "error": "synthesis_failed",
+                "raw": content[:2000]
             }
-        
-        return data
         
     except Exception as e:
         # Check if it's a timeout error
