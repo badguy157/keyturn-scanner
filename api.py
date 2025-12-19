@@ -103,6 +103,8 @@ SCAN_STATUS_RUNNING = "running"
 SCAN_STATUS_SCORING = "scoring"
 
 # Scan mode defaults
+SCAN_MODE_QUICK = "quick"
+SCAN_MODE_DEEP = "deep"
 DEFAULT_MAX_PAGES_QUICK = 1
 DEFAULT_MAX_PAGES_DEEP = 8
 MAX_PAGES_LIMIT = 50
@@ -2445,9 +2447,9 @@ def get_scan(scan_id: str):
         raise HTTPException(status_code=404, detail="Scan not found")
 
     # Determine entitlements based on scan mode
-    mode = row["mode"] if row["mode"] else "quick"
+    mode = row["mode"] if row["mode"] else SCAN_MODE_QUICK
     entitlements = {
-        "deep": mode == "deep"
+        "deep": mode == SCAN_MODE_DEEP
     }
 
     resp = {
@@ -4021,8 +4023,10 @@ async function downloadPDF() {
         if (img.complete) return Promise.resolve();
         return new Promise((resolve, reject) => {
           img.addEventListener('load', resolve);
-          img.addEventListener('error', resolve); // Resolve anyway to not block
-          setTimeout(resolve, 5000); // Timeout after 5s
+          // Resolve (not reject) on error to prevent one bad image from blocking the entire print process
+          // This ensures the print dialog still opens even if some images fail to load
+          img.addEventListener('error', resolve);
+          setTimeout(resolve, 5000); // Timeout after 5s to prevent indefinite waiting
         });
       }));
       
@@ -4562,6 +4566,17 @@ async function unlockDeepFromReport() {
   }
 }
 
+// Helper function to add screenshots from a page to the manifest
+function addPageScreenshots(manifest, screenshots, pageNum) {
+  if (!screenshots || !screenshots.screenshot_manifest) return;
+  screenshots.screenshot_manifest.forEach(item => {
+    manifest.push({
+      ...item,
+      key: item.key.replace('home_', `page${pageNum}_`)
+    });
+  });
+}
+
 async function tick() {
   const res = await fetch('/api/scan/' + scanId);
   const data = await res.json();
@@ -4620,28 +4635,8 @@ async function tick() {
   if (additionalPages.length > 0) {
     additionalPages.forEach((page, idx) => {
       const pageNum = idx + 2; // Page 1 is home, so start at 2
-      const pageDesktop = page.desktop || {};
-      const pageMobile = page.mobile || {};
-      
-      // Add desktop screenshots from this page
-      if (pageDesktop.screenshot_manifest) {
-        pageDesktop.screenshot_manifest.forEach(item => {
-          allManifest.push({
-            ...item,
-            key: item.key.replace('home_', `page${pageNum}_`)
-          });
-        });
-      }
-      
-      // Add mobile screenshots from this page
-      if (pageMobile.screenshot_manifest) {
-        pageMobile.screenshot_manifest.forEach(item => {
-          allManifest.push({
-            ...item,
-            key: item.key.replace('home_', `page${pageNum}_`)
-          });
-        });
-      }
+      addPageScreenshots(allManifest, page.desktop, pageNum);
+      addPageScreenshots(allManifest, page.mobile, pageNum);
     });
   }
 
