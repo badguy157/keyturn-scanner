@@ -2714,16 +2714,16 @@ Be specific and actionable. Use evidence from the HTML and screenshots.
             if hasattr(client, "responses") and hasattr(client.responses, "parse"):
                 response = client.responses.parse(
                     model=OPENAI_MODEL_FALLBACKS[0],
-                    messages=[
+                    input=[
                         {"role": "system", "content": [{"type": "text", "text": sys_prompt}]},
                         {"role": "user", "content": content},
                     ],
-                    response_format=PageAnalysis,
+                    text_format=PageAnalysis,
                 )
                 data = _model_to_dict(response.parsed)
                 return data
         except Exception as e:
-            print(f"[ANALYZE_PAGE] Structured output failed, falling back to JSON mode: {e}")
+            print(f"[ANALYZE_PAGE] Structured output error: {e}")
         
         # Fallback to JSON mode
         response = client.chat.completions.create(
@@ -2864,16 +2864,16 @@ IMPORTANT: You MUST provide ALL sections with the minimum requirements specified
             if hasattr(client, "responses") and hasattr(client.responses, "parse"):
                 response = client.responses.parse(
                     model=OPENAI_MODEL_FALLBACKS[0],
-                    messages=[
+                    input=[
                         {"role": "system", "content": [{"type": "text", "text": sys_prompt}]},
                         {"role": "user", "content": [{"type": "input_text", "text": f"Page Analyses Summary:\n{json.dumps(pages_summary, indent=2)}"}]},
                     ],
-                    response_format=DeepScanSynthesis,
+                    text_format=DeepScanSynthesis,
                 )
                 data = _model_to_dict(response.parsed)
                 return data
         except Exception as e:
-            print(f"[SYNTHESIZE] Structured output failed, falling back to JSON mode: {e}")
+            print(f"[SYNTHESIZE] Structured output error: {e}")
         
         # Fallback to JSON mode
         response = client.chat.completions.create(
