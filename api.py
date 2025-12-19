@@ -619,48 +619,47 @@ def normalize_page_critiques(raw: Any) -> List[Dict[str, Any]]:
     if not pages or not isinstance(pages, list):
         return []
     
+    # Define key mappings for each field
+    key_mappings = {
+        "page_url": ["page_url", "url"],
+        "page_title": ["page_title", "title"],
+        "working": ["working", "whats_working", "what_working", "what_worked", "wins", "strengths"],
+        "hurting": ["hurting", "whats_hurting", "what_hurts", "issues", "leaks", "problems"],
+        "fixes": ["fixes", "recommendations", "next_steps", "actions", "suggested_fixes"]
+    }
+    
     normalized = []
     for page_item in pages:
         if not isinstance(page_item, dict):
             continue
         
+        # Extract fields using the key mappings
+        def get_field(field_name, default=None):
+            """Get first matching value from key mappings."""
+            for key in key_mappings.get(field_name, []):
+                if key in page_item:
+                    return page_item[key]
+            return default
+        
         # Extract page_url (required)
-        page_url = page_item.get("page_url") or page_item.get("url") or ""
+        page_url = get_field("page_url", "")
         if not page_url:
             continue  # Skip items without a URL
         
         # Extract page_title (optional)
-        page_title = page_item.get("page_title") or page_item.get("title") or ""
+        page_title = get_field("page_title", "")
         
-        # Map "working" from various possible keys
-        working_keys = ["working", "whats_working", "what_working", "what_worked", "wins", "strengths"]
-        working = []
-        for key in working_keys:
-            if key in page_item:
-                val = page_item[key]
-                if isinstance(val, list):
-                    working = [str(item).strip() for item in val if item and str(item).strip()]
-                    break
+        # Extract arrays and ensure they contain non-empty strings
+        def get_array_field(field_name):
+            """Get array field and filter to non-empty strings."""
+            val = get_field(field_name, [])
+            if isinstance(val, list):
+                return [str(item).strip() for item in val if item and str(item).strip()]
+            return []
         
-        # Map "hurting" from various possible keys
-        hurting_keys = ["hurting", "whats_hurting", "what_hurts", "issues", "leaks", "problems"]
-        hurting = []
-        for key in hurting_keys:
-            if key in page_item:
-                val = page_item[key]
-                if isinstance(val, list):
-                    hurting = [str(item).strip() for item in val if item and str(item).strip()]
-                    break
-        
-        # Map "fixes" from various possible keys
-        fixes_keys = ["fixes", "recommendations", "next_steps", "actions", "suggested_fixes"]
-        fixes = []
-        for key in fixes_keys:
-            if key in page_item:
-                val = page_item[key]
-                if isinstance(val, list):
-                    fixes = [str(item).strip() for item in val if item and str(item).strip()]
-                    break
+        working = get_array_field("working")
+        hurting = get_array_field("hurting")
+        fixes = get_array_field("fixes")
         
         # Add normalized page critique
         normalized.append({
