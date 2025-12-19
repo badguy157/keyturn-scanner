@@ -465,7 +465,7 @@ class PageNotes(BaseModel):
     mobile: Optional[str] = Field(default=None, description="Mobile experience notes")
     speed: Optional[str] = Field(default=None, description="Page speed notes")
     proof: Optional[str] = Field(default=None, description="Proof/social proof notes")
-    copy: Optional[str] = Field(default=None, description="Copy/messaging notes")
+    copy_messaging: Optional[str] = Field(default=None, description="Copy/messaging notes", alias="copy")
 
 
 class PageAnalysis(BaseModel):
@@ -513,12 +513,6 @@ class DeepScanSynthesis(BaseModel):
     action_plan: List[ActionItem] = Field(..., description="Top 10 action items ranked by impact/effort")
     roadmap_90d: List[RoadmapPhase] = Field(..., description="90-day implementation roadmap")
     coverage: CoverageReport = Field(..., description="Page coverage report")
-
-
-class DeepScanSummary(BaseModel):
-    executive_summary: List[str] = Field(..., description="3-6 bullet points summarizing key findings")
-    biggest_booking_leak: str = Field(..., description="The single biggest issue causing lost bookings")
-    top_3_fixes: List[str] = Field(..., description="Top 3 recommended fixes in priority order")
 
 
 class PatientFlowAIOutput(BaseModel):
@@ -1346,16 +1340,14 @@ def trim_html_for_ai(html: str, max_chars: int = 8000) -> str:
     try:
         soup = BeautifulSoup(html, "html.parser")
         
-        # Remove script, style, and comment tags
+        # Remove script, style, and other non-content tags
         for tag in soup(["script", "style", "noscript", "iframe", "svg"]):
             tag.decompose()
         
-        # Remove comments
-        for comment in soup.findAll(text=lambda text: isinstance(text, str) and text.strip().startswith("<!--")):
+        # Remove comments (correct BeautifulSoup way)
+        from bs4 import Comment
+        for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
             comment.extract()
-        
-        # Keep important elements
-        important_tags = ["h1", "h2", "h3", "h4", "h5", "h6", "nav", "header", "footer", "button", "a", "form", "input", "select", "textarea", "p", "li", "span", "div"]
         
         # Build trimmed HTML by extracting key elements
         parts = []
@@ -1390,7 +1382,12 @@ def trim_html_for_ai(html: str, max_chars: int = 8000) -> str:
         for form in soup.find_all("form"):
             inputs = form.find_all(["input", "select", "textarea", "button"])
             if inputs:
-                input_summary = [f"{inp.name}:{inp.get('type', 'text')}" for inp in inputs[:10]]
+                input_summary = []
+                for inp in inputs[:10]:
+                    field_name = inp.get("name", inp.get("id", ""))
+                    field_type = inp.get("type", "text") if inp.name == "input" else inp.name
+                    if field_name or field_type:
+                        input_summary.append(f"{field_name}:{field_type}")
                 parts.append(f"<form>{', '.join(input_summary)}</form>")
         
         # Add some body text
@@ -3198,6 +3195,15 @@ HOME_HTML_TEMPLATE = """
     .pageTypeTag.booking_consult{background:rgba(124,247,195,.20); color:rgba(124,247,195,.95)}
     .pageTypeTag.service_detail{background:rgba(122,162,255,.20); color:rgba(122,162,255,.95)}
     .pageTypeTag.services_index{background:rgba(122,162,255,.20); color:rgba(122,162,255,.95)}
+    .pageTypeTag.results_gallery{background:rgba(255,180,100,.20); color:rgba(255,200,140,.95)}
+    .pageTypeTag.reviews{background:rgba(255,180,100,.20); color:rgba(255,200,140,.95)}
+    .pageTypeTag.pricing_financing{background:rgba(255,150,200,.20); color:rgba(255,180,220,.95)}
+    .pageTypeTag.about_doctor{background:rgba(200,100,255,.20); color:rgba(220,180,255,.95)}
+    .pageTypeTag.contact_locations{background:rgba(200,100,255,.20); color:rgba(220,180,255,.95)}
+    .pageTypeTag.form_step{background:rgba(100,255,200,.20); color:rgba(140,255,220,.95)}
+    .pageTypeTag.blog{background:rgba(180,180,180,.20); color:rgba(220,220,220,.85)}
+    .pageTypeTag.other{background:rgba(180,180,180,.20); color:rgba(220,220,220,.85)}
+    .pageTypeTag.unknown{background:rgba(180,180,180,.20); color:rgba(220,220,220,.85)}
   </style>
 </head>
 <body>
@@ -4902,14 +4908,7 @@ REPORT_HTML_TEMPLATE = """
       text-transform:uppercase;
       letter-spacing:0.3px;
     }
-    .pageTypeTag.home{ background:rgba(122,162,255,.25); color:rgba(200,220,255,.95); }
-    .pageTypeTag.services{ background:rgba(124,247,195,.20); color:rgba(124,247,195,.95); }
-    .pageTypeTag.treatment{ background:rgba(255,200,100,.20); color:rgba(255,220,150,.95); }
-    .pageTypeTag.contact{ background:rgba(200,100,255,.20); color:rgba(220,180,255,.95); }
-    .pageTypeTag.reviews{ background:rgba(255,180,100,.20); color:rgba(255,200,140,.95); }
-    .pageTypeTag.booking{ background:rgba(100,255,200,.20); color:rgba(140,255,220,.95); }
-    .pageTypeTag.pricing{ background:rgba(255,150,200,.20); color:rgba(255,180,220,.95); }
-    .pageTypeTag.other{ background:rgba(180,180,180,.20); color:rgba(220,220,220,.85); }
+    /* Remove duplicate old-style pageTypeTag - using consolidated styles from deep scan section */
     .pageScore{
       font-size:13px;
       font-weight:700;
