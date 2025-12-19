@@ -324,6 +324,45 @@ def init_db() -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scan_pages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          scan_id TEXT NOT NULL,
+          url TEXT NOT NULL,
+          title TEXT,
+          page_type TEXT,
+          is_mobile INTEGER DEFAULT 0,
+          screenshot_paths TEXT,
+          html_path TEXT,
+          extracted_signals TEXT,
+          analysis TEXT,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY (scan_id) REFERENCES scans(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_scan_pages_scan_id 
+        ON scan_pages(scan_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scan_summaries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          scan_id TEXT NOT NULL UNIQUE,
+          executive_summary TEXT,
+          journey_map TEXT,
+          action_plan TEXT,
+          roadmap_90d TEXT,
+          coverage TEXT,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY (scan_id) REFERENCES scans(id)
+        )
+        """
+    )
     conn.commit()
     conn.close()
     _ensure_columns()
@@ -741,14 +780,24 @@ OUTCOME_WORDS = [
     "brighter",
 ]
 
-# Page selection targets for deep scan
-DEEP_SCAN_BOOKING_TARGET = 1  # Always include booking/contact if available
-DEEP_SCAN_SERVICE_MIN = 3  # Minimum service pages
-DEEP_SCAN_SERVICE_RATIO = 0.4  # Service pages as ratio of remaining slots
-DEEP_SCAN_PROOF_TARGET = 1
-DEEP_SCAN_PRICING_TARGET = 1
-DEEP_SCAN_ABOUT_TARGET = 1
-DEEP_SCAN_FAQ_TARGET = 1
+# Page selection targets for deep scan (updated for new funnel page types)
+# Priority order: home, booking_consult, services_index, service_detail, results_gallery, 
+#                 reviews, pricing_financing, about_doctor, contact_locations, form_step
+DEEP_SCAN_TARGETS = {
+    "booking_consult": 1,      # Always include booking if available
+    "services_index": 1,       # Main services page
+    "service_detail": 3,       # Multiple service detail pages (3-5 depending on availability)
+    "results_gallery": 1,      # Before/after gallery
+    "reviews": 1,              # Reviews/testimonials
+    "pricing_financing": 1,    # Pricing page
+    "about_doctor": 1,         # About/doctor page
+    "contact_locations": 1,    # Contact/locations
+    "form_step": 0,            # Don't prioritize form steps (only if discovered)
+}
+
+# Minimum service detail pages to include (important for deep scan quality)
+DEEP_SCAN_SERVICE_MIN = 2
+DEEP_SCAN_SERVICE_MAX = 5
 
 # Regex patterns for identifying page sections
 HEADER_CLASS_RE = re.compile(r"header|nav", re.I)
@@ -812,44 +861,75 @@ def _score_url(url: str) -> int:
     return score
 
 
-def _classify_page_type(url: str, anchor_text: str) -> str:
-    """Classify a page candidate into a type using URL + anchor text heuristics.
+def _classify_page_type(url: str, anchor_text: str, h1_text: str = "") -> str:
+    """Classify a page candidate into a type using URL + anchor text + h1 heuristics.
     
-    Returns one of: booking/contact, service, proof, pricing/financing, about/doctor, faq/location, blog/news, policy, other
+    Returns one of: home, booking_consult, services_index, service_detail, results_gallery, 
+                    reviews, pricing_financing, about_doctor, contact_locations, form_step, other
+    
+    Priority order for deep scan selection:
+    1. home (always included)
+    2. booking_consult
+    3. services_index
+    4. service_detail
+    5. results_gallery
+    6. reviews
+    7. pricing_financing
+    8. about_doctor
+    9. contact_locations
+    10. form_step
     """
     url_lower = url.lower()
     anchor_lower = anchor_text.lower()
-    combined = url_lower + " " + anchor_lower
+    h1_lower = h1_text.lower()
+    combined = url_lower + " " + anchor_lower + " " + h1_lower
     
-    # Booking/Contact (highest priority)
-    if any(k in combined for k in ["book", "appointment", "schedule", "consult", "contact", "call-us", "request"]):
-        return "booking/contact"
+    # Home page (only if it's the root URL)
+    parsed = urlparse(url)
+    if parsed.path in ['/', '', '/index.html', '/index.php', '/home', '/home.html']:
+        return "home"
     
-    # Service pages
-    if any(k in combined for k in ["service", "treatment", "procedure", "injection", "laser", "botox", "filler", "facial", "coolsculpt", "liposuction"]):
-        return "service"
+    # Booking/Consult (highest priority for funnel)
+    if any(k in combined for k in ["book", "appointment", "schedule", "consult", "request-consult", "request-appointment"]):
+        return "booking_consult"
     
-    # Proof (reviews, before/after, gallery, testimonials)
-    if any(k in combined for k in ["review", "testimonial", "before-after", "before-and-after", "gallery", "result", "patient", "case-stud"]):
-        return "proof"
+    # Contact/Locations
+    if any(k in combined for k in ["contact", "location", "find-us", "directions", "office", "visit-us"]):
+        return "contact_locations"
+    
+    # Form step pages (multi-step forms)
+    if any(k in combined for k in ["form", "step-", "checkout", "confirm"]):
+        return "form_step"
+    
+    # Services index (main services listing page)
+    if any(k in combined for k in ["services", "treatments", "procedures"]) and not any(k in combined for k in ["botox", "filler", "laser", "facial", "coolsculpt", "liposuction", "injection"]):
+        return "services_index"
+    
+    # Service detail pages (specific treatment pages)
+    if any(k in combined for k in ["service/", "treatment/", "procedure/", "botox", "filler", "laser", "facial", "coolsculpt", "liposuction", "injection", "skincare"]):
+        return "service_detail"
+    
+    # Results gallery / Before-After
+    if any(k in combined for k in ["before-after", "before-and-after", "gallery", "result", "portfolio", "case-stud"]):
+        return "results_gallery"
+    
+    # Reviews / Testimonials
+    if any(k in combined for k in ["review", "testimonial", "patient-stor", "success-stor"]):
+        return "reviews"
     
     # Pricing/Financing
     if any(k in combined for k in ["pric", "cost", "payment", "financ", "afford", "special", "offer", "promotion"]):
-        return "pricing/financing"
+        return "pricing_financing"
     
     # About/Doctor
-    if any(k in combined for k in ["about", "doctor", "dr-", "dr.", "team", "staff", "physician", "meet-", "our-team", "credentials"]):
-        return "about/doctor"
+    if any(k in combined for k in ["about", "doctor", "dr-", "dr.", "team", "staff", "physician", "meet-", "our-team", "credentials", "bio"]):
+        return "about_doctor"
     
-    # FAQ/Location
-    if any(k in combined for k in ["faq", "question", "location", "direction", "hour", "contact-us", "find-us"]):
-        return "faq/location"
-    
-    # Blog/News (lower priority)
+    # Blog/News (lower priority - not in top 10)
     if any(k in combined for k in ["blog", "news", "article", "post", "media"]):
-        return "blog/news"
+        return "blog"
     
-    # Policy (lowest priority)
+    # Policy (lowest priority - skip)
     if any(k in combined for k in ["privacy", "policy", "term", "legal", "hipaa", "disclaimer"]):
         return "policy"
     
@@ -872,15 +952,20 @@ def _score_page_candidate(url: str, anchor_text: str, page_type: str, is_cta: bo
     score = 0.0
     
     # Base score by page type (funnel-critical pages score higher)
+    # Priority order matches the problem statement
     type_scores = {
-        "booking/contact": 100,
-        "service": 80,
-        "proof": 70,
-        "pricing/financing": 75,
-        "about/doctor": 65,
-        "faq/location": 50,
+        "home": 100,  # Always selected
+        "booking_consult": 95,
+        "services_index": 85,
+        "service_detail": 80,
+        "results_gallery": 75,
+        "reviews": 75,
+        "pricing_financing": 70,
+        "about_doctor": 65,
+        "contact_locations": 60,
+        "form_step": 55,
         "other": 40,
-        "blog/news": 20,
+        "blog": 20,
         "policy": 10,
     }
     score += type_scores.get(page_type, 30)
@@ -1027,18 +1112,18 @@ def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
         type_counts = {}
         
         # Target mix (out of max_pages - 1, since home is guaranteed)
-        # Adjust these based on max_pages
         remaining_slots = max_pages - 1
         
         # Priority selection strategy using configurable targets
-        targets = {
-            "booking/contact": min(DEEP_SCAN_BOOKING_TARGET, remaining_slots),
-            "service": min(max(DEEP_SCAN_SERVICE_MIN, int(remaining_slots * DEEP_SCAN_SERVICE_RATIO)), remaining_slots),
-            "proof": min(DEEP_SCAN_PROOF_TARGET, remaining_slots),
-            "pricing/financing": min(DEEP_SCAN_PRICING_TARGET, remaining_slots),
-            "about/doctor": min(DEEP_SCAN_ABOUT_TARGET, remaining_slots),
-            "faq/location": min(DEEP_SCAN_FAQ_TARGET, remaining_slots),
-        }
+        # Build targets dict with service_detail having dynamic target based on availability
+        targets = {}
+        for page_type, target in DEEP_SCAN_TARGETS.items():
+            if page_type == "service_detail":
+                # Dynamic service detail target: min 2, max 5, adjusted for remaining slots
+                service_target = min(DEEP_SCAN_SERVICE_MAX, max(DEEP_SCAN_SERVICE_MIN, int(remaining_slots * 0.4)))
+                targets[page_type] = min(service_target, remaining_slots)
+            else:
+                targets[page_type] = min(target, remaining_slots)
         
         # First pass: fill priority types up to targets
         for candidate in candidates:
@@ -1053,8 +1138,8 @@ def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
             current_count = type_counts.get(page_type, 0)
             target_count = targets.get(page_type, 0)
             
-            # Skip blog/news/policy in first pass
-            if page_type in ["blog/news", "policy"]:
+            # Skip blog/policy in first pass
+            if page_type in ["blog", "policy"]:
                 continue
             
             # Add if under target for this type
@@ -1073,14 +1158,14 @@ def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
             
             page_type = candidate["type"]
             
-            # Still avoid blog/news/policy unless desperate
-            if page_type in ["blog/news", "policy"]:
+            # Still avoid blog/policy unless desperate
+            if page_type in ["blog", "policy"]:
                 continue
             
             selected.append(url)
             type_counts[page_type] = type_counts.get(page_type, 0) + 1
         
-        # Third pass: if still not at max_pages, include blog/news/other (but not policy)
+        # Third pass: if still not at max_pages, include blog/other (but not policy)
         if len(selected) < max_pages:
             for candidate in candidates:
                 if len(selected) >= max_pages:
