@@ -2533,7 +2533,7 @@ Return output that fits the required JSON schema.
                     resp = client.responses.parse(
                         model=model,
                         input=[
-                            {"role": "system", "content": sys_prompt},
+                            {"role": "system", "content": [{"type": "input_text", "text": sys_prompt}]},
                             {"role": "user", "content": content},
                         ],
                         text_format=PatientFlowAIOutput,
@@ -2544,7 +2544,7 @@ Return output that fits the required JSON schema.
                     resp = client.responses.parse(
                         model=model,
                         input=[
-                            {"role": "system", "content": sys_prompt},
+                            {"role": "system", "content": [{"type": "input_text", "text": sys_prompt}]},
                             {"role": "user", "content": content},
                         ],
                         text_format=PatientFlowAIOutput,
@@ -2559,7 +2559,10 @@ Return output that fits the required JSON schema.
                 # Fallback (older SDK): plain create + manual JSON parse
                 resp = client.responses.create(
                     model=model,
-                    input=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": content}],
+                    input=[
+                        {"role": "system", "content": [{"type": "input_text", "text": sys_prompt}]},
+                        {"role": "user", "content": content}
+                    ],
                     temperature=0.1,
                 )
                 raw = (getattr(resp, "output_text", "") or "").strip()
@@ -2829,7 +2832,7 @@ Be specific and actionable. Use evidence from the HTML and screenshots.
                 response = client.responses.parse(
                     model=OPENAI_MODEL_FALLBACKS[0],
                     input=[
-                        {"role": "system", "content": [{"type": "text", "text": sys_prompt}]},
+                        {"role": "system", "content": [{"type": "input_text", "text": sys_prompt}]},
                         {"role": "user", "content": content},
                     ],
                     text_format=PageAnalysis,
@@ -2982,7 +2985,7 @@ IMPORTANT: You MUST provide ALL sections with the minimum requirements specified
                 response = client.responses.parse(
                     model=OPENAI_MODEL_FALLBACKS[0],
                     input=[
-                        {"role": "system", "content": [{"type": "text", "text": sys_prompt}]},
+                        {"role": "system", "content": [{"type": "input_text", "text": sys_prompt}]},
                         {"role": "user", "content": [{"type": "input_text", "text": f"Page Analyses Summary:\n{json.dumps(pages_summary, indent=2)}"}]},
                     ],
                     text_format=DeepScanSynthesis,
