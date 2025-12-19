@@ -1456,16 +1456,20 @@ def _img_to_data_url(path_str: Optional[str], max_dimension: int = 1600) -> Opti
                     img = img.convert('RGBA')
                 
                 # Extract alpha channel based on mode
-                if img.mode == 'RGBA':
+                alpha_channel = None
+                if img.mode == 'RGBA' and len(img.split()) == 4:
                     # RGBA has alpha as the 4th channel
                     alpha_channel = img.split()[3]
-                elif img.mode == 'LA':
+                elif img.mode == 'LA' and len(img.split()) == 2:
                     # LA has alpha as the 2nd channel
                     alpha_channel = img.split()[1]
-                else:
-                    alpha_channel = None
                 
-                background.paste(img, mask=alpha_channel)
+                # Paste with alpha channel if available, otherwise paste without mask
+                if alpha_channel:
+                    background.paste(img, mask=alpha_channel)
+                else:
+                    # Fallback: convert to RGB directly if no alpha channel
+                    background = img.convert('RGB')
                 img = background
             elif img.mode != 'RGB':
                 img = img.convert('RGB')
