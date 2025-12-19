@@ -20,6 +20,9 @@ wheels/
 .installed.cfg
 *.egg
 
+# Tests
+test_*.py
+
 # Database
 *.sqlite
 *.sqlite-journal

@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Page Critiques Rendering Test</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .pageCritiqueCard {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .pageCritiqueTitle {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            color: #111;
+        }
+        .pageCritiqueSection {
+            margin-bottom: 16px;
+        }
+        .pageCritiqueLabel {
+            font-weight: 600;
+            margin-bottom: 8px;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .pageCritiqueLabel.working { color: #059669; }
+        .pageCritiqueLabel.hurting { color: #dc2626; }
+        .pageCritiqueLabel.fixes { color: #2563eb; }
+        .pageCritiqueList {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .pageCritiqueItem {
+            padding: 8px 12px;
+            margin-bottom: 6px;
+            border-radius: 4px;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        .pageCritiqueItem.working {
+            background: rgba(5, 150, 105, 0.1);
+            border-left: 3px solid #059669;
+        }
+        .pageCritiqueItem.hurting {
+            background: rgba(220, 38, 38, 0.1);
+            border-left: 3px solid #dc2626;
+        }
+        .pageCritiqueItem.fix {
+            background: rgba(37, 99, 235, 0.1);
+            border-left: 3px solid #2563eb;
+        }
+        h1 {
+            color: #111;
+        }
+        .test-section {
+            margin-bottom: 40px;
+        }
+        .test-label {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 10px;
+            padding: 4px 8px;
+            background: #e5e5e5;
+            border-radius: 4px;
+            display: inline-block;
+        }
+    </style>
+</head>
+<body>
+    <h1>Page Critiques Rendering Test</h1>
+    
+    <div class="test-section">
+        <div class="test-label">Test 1: Standard Page Critique (all fields populated)</div>
+        <div id="test1"></div>
+    </div>
+    
+    <div class="test-section">
+        <div class="test-label">Test 2: Page Critique with Empty Arrays (should show debug message)</div>
+        <div id="test2"></div>
+    </div>
+    
+    <div class="test-section">
+        <div class="test-label">Test 3: Page Critique with Mixed Content (some empty, some populated)</div>
+        <div id="test3"></div>
+    </div>
+    
+    <div class="test-section">
+        <div class="test-label">Test 4: Page Critique with Alternate Keys (working/hurting/fixes)</div>
+        <div id="test4"></div>
+    </div>
+
+    <script>
+        function esc(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+        
+        function renderPageCritiques(critiques, containerId) {
+            const container = document.getElementById(containerId);
+            
+            if (!critiques || !critiques.length) {
+                container.innerHTML = '<p>No critiques provided</p>';
+                return;
+            }
+            
+            const html = critiques.map(critique => {
+                // Map both normalized keys (working/hurting/fixes) and legacy keys (whats_working/whats_hurting)
+                const working = critique.working || critique.whats_working || [];
+                const hurting = critique.hurting || critique.whats_hurting || [];
+                const fixes = critique.fixes || [];
+                
+                const workingHtml = (working && working.length) ?
+                  `<div class="pageCritiqueSection">
+                    <div class="pageCritiqueLabel working">What's Working</div>
+                    <ul class="pageCritiqueList">
+                      ${working.map(item => 
+                        `<li class="pageCritiqueItem working">${esc(item)}</li>`
+                      ).join('')}
+                    </ul>
+                  </div>` : '';
+                
+                const hurtingHtml = (hurting && hurting.length) ?
+                  `<div class="pageCritiqueSection">
+                    <div class="pageCritiqueLabel hurting">What's Hurting</div>
+                    <ul class="pageCritiqueList">
+                      ${hurting.map(item => 
+                        `<li class="pageCritiqueItem hurting">${esc(item)}</li>`
+                      ).join('')}
+                    </ul>
+                  </div>` : '';
+                
+                const fixesHtml = (fixes && fixes.length) ?
+                  `<div class="pageCritiqueSection">
+                    <div class="pageCritiqueLabel fixes">Recommended Fixes</div>
+                    <ul class="pageCritiqueList">
+                      ${fixes.map(item => 
+                        `<li class="pageCritiqueItem fix">${esc(item)}</li>`
+                      ).join('')}
+                    </ul>
+                  </div>` : '';
+                
+                // Defensive rendering: show debug message if all arrays are empty
+                const hasContent = (working && working.length) || (hurting && hurting.length) || (fixes && fixes.length);
+                const debugHtml = !hasContent ? 
+                  `<div class="pageCritiqueSection" style="opacity: 0.6;">
+                    <p style="color: #666; font-size: 14px;">No findings captured for this page (debug)</p>
+                    <p style="color: #666; font-size: 12px; font-family: monospace;">
+                      Keys present: ${Object.keys(critique).join(', ')}
+                    </p>
+                  </div>` : '';
+                
+                return `<div class="pageCritiqueCard">
+                  <div class="pageCritiqueTitle">${esc(critique.page_title || critique.page_url)}</div>
+                  ${workingHtml}
+                  ${hurtingHtml}
+                  ${fixesHtml}
+                  ${debugHtml}
+                </div>`;
+            }).join('');
+            
+            container.innerHTML = html;
+        }
+        
+        // Test 1: Standard page critique with all fields
+        renderPageCritiques([
+            {
+                page_url: "https://example.com/home",
+                page_title: "Home Page",
+                working: ["Clear headline", "Strong call-to-action", "Fast loading"],
+                hurting: ["Buried contact info", "No mobile menu", "Weak social proof"],
+                fixes: ["Move contact to header", "Add mobile navigation", "Add testimonials"]
+            }
+        ], 'test1');
+        
+        // Test 2: Page critique with empty arrays (debug mode)
+        renderPageCritiques([
+            {
+                page_url: "https://example.com/empty",
+                page_title: "Empty Page Critique",
+                working: [],
+                hurting: [],
+                fixes: []
+            }
+        ], 'test2');
+        
+        // Test 3: Mixed content
+        renderPageCritiques([
+            {
+                page_url: "https://example.com/mixed",
+                page_title: "Mixed Content Page",
+                working: ["Good branding"],
+                hurting: [],  // Empty
+                fixes: ["Add pricing information"]
+            }
+        ], 'test3');
+        
+        // Test 4: Using alternate keys (whats_working/whats_hurting)
+        renderPageCritiques([
+            {
+                page_url: "https://example.com/alternate",
+                page_title: "Alternate Keys Test",
+                whats_working: ["Excellent mobile design"],
+                whats_hurting: ["Confusing navigation"],
+                fixes: ["Simplify menu structure"]
+            }
+        ], 'test4');
+    </script>
+</body>
+</html>
