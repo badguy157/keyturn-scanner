@@ -3369,7 +3369,20 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                             }
                 
                 # Track success/failure based on actual analysis result
-                if analysis and not analysis.get("error"):
+                # Ensure analysis is never None - create fallback if needed
+                if analysis is None:
+                    analysis = {
+                        "url": page_url,
+                        "page_type": page_type,
+                        "summary": "Unknown error - analysis not completed",
+                        "strengths": [],
+                        "leaks": [],
+                        "quick_wins": [],
+                        "notes": {},
+                        "error": "Unknown error - analysis was None after retry loop",
+                    }
+                
+                if not analysis.get("error"):
                     successful_page_analyses += 1
                 else:
                     failed_page_analyses += 1
@@ -3393,14 +3406,15 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                             "mobile": mobile_data.get("screenshot_urls", []),
                         }),
                         db_safe(signals),
-                        db_safe(analysis) if analysis else db_safe({}),
+                        db_safe(analysis),  # analysis is guaranteed to be a dict now
                         now_iso(),
                     ),
                 )
                 conn.commit()
                 
                 # Free memory immediately after storing
-                del analysis
+                if analysis is not None:
+                    del analysis
                 del html_content
                 del signals
                 pages_processed += 1
