@@ -723,12 +723,18 @@ OUTCOME_WORDS = [
     "brighter",
 ]
 
-MIME_BY_EXT = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".webp": "image/webp",
-}
+# Page selection targets for deep scan
+DEEP_SCAN_BOOKING_TARGET = 1  # Always include booking/contact if available
+DEEP_SCAN_SERVICE_MIN = 3  # Minimum service pages
+DEEP_SCAN_SERVICE_RATIO = 0.4  # Service pages as ratio of remaining slots
+DEEP_SCAN_PROOF_TARGET = 1
+DEEP_SCAN_PRICING_TARGET = 1
+DEEP_SCAN_ABOUT_TARGET = 1
+DEEP_SCAN_FAQ_TARGET = 1
+
+# Regex patterns for identifying page sections
+HEADER_CLASS_RE = re.compile(r"header|nav", re.I)
+FOOTER_CLASS_RE = re.compile(r"footer", re.I)
 
 
 # Keywords for URL prioritization (higher score = more likely to contain patient-flow signals)
@@ -933,8 +939,12 @@ def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
         soup = BeautifulSoup(html, "html.parser")
         
         # Identify header, footer, and body sections
-        header = soup.find("header") or soup.find(class_=re.compile(r"header|nav", re.I))
-        footer = soup.find("footer") or soup.find(class_=re.compile(r"footer", re.I))
+        header = soup.find("header") or soup.find(class_=HEADER_CLASS_RE)
+        footer = soup.find("footer") or soup.find(class_=FOOTER_CLASS_RE)
+        
+        # Pre-compute header and footer link sets for O(1) membership checks
+        header_links = set(header.find_all("a", href=True)) if header else set()
+        footer_links = set(footer.find_all("a", href=True)) if footer else set()
         
         # Extract all links with metadata
         for a_tag in soup.find_all("a", href=True):
@@ -946,9 +956,9 @@ def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
             
             # Determine location
             location = "body"
-            if header and a_tag in header.find_all("a"):
+            if a_tag in header_links:
                 location = "header"
-            elif footer and a_tag in footer.find_all("a"):
+            elif a_tag in footer_links:
                 location = "footer"
             
             # Check if it's a CTA link
@@ -1002,21 +1012,14 @@ def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
         # Adjust these based on max_pages
         remaining_slots = max_pages - 1
         
-        # Priority selection strategy:
-        # 1. Always include 1 booking/contact if available
-        # 2. Include 3-4 services if available (or up to 40% of remaining)
-        # 3. Include 1 proof if available
-        # 4. Include 1 pricing/financing if available
-        # 5. Include 1 about/doctor if available
-        # 6. Fill remaining by score
-        
+        # Priority selection strategy using configurable targets
         targets = {
-            "booking/contact": min(1, remaining_slots),
-            "service": min(max(3, int(remaining_slots * 0.4)), remaining_slots),
-            "proof": min(1, remaining_slots),
-            "pricing/financing": min(1, remaining_slots),
-            "about/doctor": min(1, remaining_slots),
-            "faq/location": min(1, remaining_slots),
+            "booking/contact": min(DEEP_SCAN_BOOKING_TARGET, remaining_slots),
+            "service": min(max(DEEP_SCAN_SERVICE_MIN, int(remaining_slots * DEEP_SCAN_SERVICE_RATIO)), remaining_slots),
+            "proof": min(DEEP_SCAN_PROOF_TARGET, remaining_slots),
+            "pricing/financing": min(DEEP_SCAN_PRICING_TARGET, remaining_slots),
+            "about/doctor": min(DEEP_SCAN_ABOUT_TARGET, remaining_slots),
+            "faq/location": min(DEEP_SCAN_FAQ_TARGET, remaining_slots),
         }
         
         # First pass: fill priority types up to targets
@@ -1078,9 +1081,13 @@ def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
         # Log selection
         print(f"[DISCOVER] Found {len(candidates)} candidates, selected {len(selected)} pages")
         print(f"[DISCOVER] Type distribution: {type_counts}")
+        
+        # Create URL-to-candidate mapping for efficient logging
+        url_to_candidate = {c["url"]: c for c in candidates}
+        
         for i, url in enumerate(selected[:10]):
             # Find candidate info for logging
-            candidate_info = next((c for c in candidates if c["url"] == url), None)
+            candidate_info = url_to_candidate.get(url)
             if i == 0:
                 print(f"  [1] (home) {url}")
             elif candidate_info:
