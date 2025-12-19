@@ -6697,10 +6697,12 @@ function renderErrors(errs) {
 function statusNice(s) {
   const m = (s || "").toLowerCase();
   if (m === "queued") return "Queued...";
-  if (m === "running") return "Capturing site...";
+  if (m === "running") return "Capturing site...";  // Legacy - keep for backward compatibility
+  if (m === "scanning") return "Capturing site...";
   if (m === "scoring") return "Scoring...";
   if (m === "done") return "Done";
   if (m === "error") return "Error";
+  if (m === "timed_out") return "Timed Out";
   return s || "Loading...";
 }
 
@@ -7237,7 +7239,7 @@ async function tick() {
     }
 
     // Determine if we should continue polling
-    if (st === 'queued' || st === 'running' || st === 'scoring') {
+    if (st === 'queued' || st === 'running' || st === 'scanning' || st === 'scoring') {
       shouldContinuePolling = true;
     }
   } catch (error) {
