@@ -26,6 +26,7 @@ import base64
 import hashlib
 import hmac
 import json
+import mimetypes
 import os
 import re
 import sqlite3
@@ -114,6 +115,23 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 # Deep scan configuration
 DEEP_SCAN_TEXT_SAMPLE_LIMIT = 500  # Character limit for text samples in deep scan evidence
+
+# Configure mimetypes for better file type detection
+mimetypes.add_type("image/webp", ".webp")
+
+
+def guess_mime(path: str) -> str:
+    """Guess MIME type from file path using Python's mimetypes module.
+    
+    Args:
+        path: File path (can be string or Path object)
+    
+    Returns:
+        MIME type string, defaults to "application/octet-stream" if unknown
+    """
+    mt, _ = mimetypes.guess_type(path)
+    return mt or "application/octet-stream"
+
 
 RUBRIC_TEXT = """Clinic Patient-Flow Score – Rubric v0.2
 Categories (0–10 each, total 60)
@@ -1118,7 +1136,7 @@ def _img_to_data_url(path_str: Optional[str]) -> Optional[str]:
     if not p.exists():
         return None
 
-    mime = MIME_BY_EXT.get(p.suffix.lower(), "image/jpeg")
+    mime = guess_mime(str(p))
     b64 = base64.b64encode(p.read_bytes()).decode("utf-8")
     return f"data:{mime};base64,{b64}"
 
