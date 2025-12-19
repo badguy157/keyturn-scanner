@@ -3825,8 +3825,9 @@ def get_scan(scan_id: str):
     updated_at_str = row["updated_at"]
     if status == SCAN_STATUS_SCORING and updated_at_str:
         try:
-            # Parse updated_at timestamp (ISO format)
-            updated_at = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
+            # Parse updated_at timestamp (ISO format with Z suffix)
+            # Remove Z and make it timezone-naive for comparison with utcnow()
+            updated_at = datetime.fromisoformat(updated_at_str.replace("Z", ""))
             now = datetime.utcnow()
             age_seconds = (now - updated_at).total_seconds()
             
@@ -3937,14 +3938,14 @@ def get_scan_debug(scan_id: str):
     resp = {
         "scan_id": row["id"],
         "status": row["status"],
-        "progress_step": row.get("progress_step"),
-        "progress_pct": row.get("progress_pct"),
+        "progress_step": row["progress_step"],
+        "progress_pct": row["progress_pct"],
         "updated_at": row["updated_at"],
-        "started_at": row.get("started_at"),
-        "finished_at": row.get("finished_at"),
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
         "error": row["error"],
-        "mode": row.get("mode"),
-        "pages_scanned": row.get("pages_scanned"),
+        "mode": row["mode"],
+        "pages_scanned": row["pages_scanned"],
     }
     
     # Add report keys if available
