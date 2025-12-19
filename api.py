@@ -110,6 +110,9 @@ DEFAULT_MAX_PAGES_QUICK = 1
 DEFAULT_MAX_PAGES_DEEP = 10
 MAX_PAGES_LIMIT = 50
 
+# Deep scan text limits
+DEEP_SCAN_RAW_RESPONSE_LIMIT = 1000
+
 # User agent for HTTP requests
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
@@ -2711,7 +2714,7 @@ IMPORTANT: You MUST provide ALL sections with the minimum requirements specified
                 "roadmap_90d": [],
                 "coverage": {"scanned_pages": [], "missing_recommended": []},
                 "error": "JSON parsing failed",
-                "raw_response": content[:1000],  # Store truncated raw response for debugging
+                "raw_response": content[:DEEP_SCAN_RAW_RESPONSE_LIMIT],  # Store truncated raw response for debugging
             }
         
         return data
