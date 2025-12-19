@@ -3697,7 +3697,7 @@ REPORT_HTML_TEMPLATE = """
         <div class="miniBars" id="miniScoreBars"></div>
       </div>
       <div class="panel screenshotsCard">
-        <h2>Screenshots</h2>
+        <h2>Screenshots <span id="pagesScannedLabel" style="display:none; font-size:13px; font-weight:600; color:rgba(124,247,195,.85); margin-left:8px;"></span></h2>
         <div class="tabs">
           <button class="tab active" data-tab="desktop">Desktop</button>
           <button class="tab" data-tab="mobile">Mobile</button>
@@ -4044,11 +4044,28 @@ async function downloadPDF() {
 }
 
 const KEY_LABELS = {
-  "home_desktop_top": "Desktop (top)",
-  "home_mobile_top": "Mobile (top)",
-  "home_mobile_mid": "Mobile (mid)",
-  "home_mobile_bottom": "Mobile (bottom)"
+  "home_desktop_top": "Homepage - Desktop",
+  "home_mobile_top": "Homepage - Mobile (top)",
+  "home_mobile_mid": "Homepage - Mobile (mid)",
+  "home_mobile_bottom": "Homepage - Mobile (bottom)"
 };
+
+// Function to generate label for any page screenshot
+function getScreenshotLabel(key) {
+  // Check if it's in the predefined labels
+  if (KEY_LABELS[key]) return KEY_LABELS[key];
+  
+  // Parse dynamic page keys like "page2_desktop_top", "page3_mobile_top"
+  const match = key.match(/^page(\d+)_(desktop|mobile)_?(.*)$/);
+  if (match) {
+    const pageNum = match[1];
+    const device = match[2].charAt(0).toUpperCase() + match[2].slice(1);
+    const position = match[3] ? ` (${match[3]})` : '';
+    return `Page ${pageNum} - ${device}${position}`;
+  }
+  
+  return key || "Screenshot";
+}
 
 let currentImages = [];
 let currentIndex = 0;
@@ -4313,12 +4330,13 @@ function renderImages(manifest, fallbackUrls) {
     if (seen.has(u)) continue;
     seen.add(u);
     
-    const label = KEY_LABELS[it.key] || (it.key ? it.key : "Screenshot");
+    const label = getScreenshotLabel(it.key);
     const imgData = { url: u, key: it.key, label: label };
     
-    if (it.key && it.key.startsWith('home_desktop')) {
+    // Categorize by device type (check for desktop or mobile in key)
+    if (it.key && (it.key.includes('desktop') || it.key.startsWith('home_desktop'))) {
       desktopImages.push(imgData);
-    } else if (it.key && it.key.startsWith('home_mobile')) {
+    } else if (it.key && (it.key.includes('mobile') || it.key.startsWith('home_mobile'))) {
       mobileImages.push(imgData);
     }
   }
@@ -4560,6 +4578,14 @@ async function tick() {
   const ev = data.evidence || {};
   const scanMetadata = ev.scan_metadata || {};
   const scanMode = scanMetadata.mode || 'quick';
+  const pagesScanned = scanMetadata.pages_scanned || 1;
+  
+  // Update pages scanned label
+  const pagesScannedLabel = document.getElementById('pagesScannedLabel');
+  if (pagesScannedLabel && pagesScanned > 1) {
+    pagesScannedLabel.textContent = `(${pagesScanned} pages scanned)`;
+    pagesScannedLabel.style.display = 'inline';
+  }
   
   // Show/hide UI components based on isDeliverable
   const deepScanCard = document.getElementById('deepScanCard');
@@ -4583,16 +4609,47 @@ async function tick() {
 
   const hd = (ev.home_desktop || {});
   const hm = (ev.home_mobile || {});
-
-  const manifest = []
-    .concat(hd.screenshot_manifest || [])
-    .concat(hm.screenshot_manifest || []);
+  
+  // Collect all screenshots including additional pages for deep scans
+  let allManifest = [];
+  allManifest = allManifest.concat(hd.screenshot_manifest || []);
+  allManifest = allManifest.concat(hm.screenshot_manifest || []);
+  
+  // Add screenshots from additional pages if in deep mode
+  const additionalPages = ev.additional_pages || [];
+  if (additionalPages.length > 0) {
+    additionalPages.forEach((page, idx) => {
+      const pageNum = idx + 2; // Page 1 is home, so start at 2
+      const pageDesktop = page.desktop || {};
+      const pageMobile = page.mobile || {};
+      
+      // Add desktop screenshots from this page
+      if (pageDesktop.screenshot_manifest) {
+        pageDesktop.screenshot_manifest.forEach(item => {
+          allManifest.push({
+            ...item,
+            key: item.key.replace('home_', `page${pageNum}_`)
+          });
+        });
+      }
+      
+      // Add mobile screenshots from this page
+      if (pageMobile.screenshot_manifest) {
+        pageMobile.screenshot_manifest.forEach(item => {
+          allManifest.push({
+            ...item,
+            key: item.key.replace('home_', `page${pageNum}_`)
+          });
+        });
+      }
+    });
+  }
 
   const fallbackUrls = []
     .concat(hd.screenshot_urls || [])
     .concat(hm.screenshot_urls || []);
 
-  renderImages(manifest, fallbackUrls);
+  renderImages(allManifest, fallbackUrls);
 
   const errs = []
     .concat(hd.screenshot_errors || [])
