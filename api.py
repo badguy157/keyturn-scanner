@@ -23,7 +23,7 @@
 #   python -m uvicorn api:app --reload
 
 import base64
-import gc
+import gc  # For explicit memory management in memory-constrained environments (512MB Render instance)
 import hashlib
 import hmac
 import json
@@ -3285,7 +3285,8 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                     del signals
                     pages_processed += 1
                     
-                    # Call garbage collector every 2 pages to free memory
+                    # Call garbage collector every 2 pages to free memory aggressively
+                    # This is needed for 512MB memory-constrained environments
                     if pages_processed % 2 == 0:
                         gc.collect()
                     
