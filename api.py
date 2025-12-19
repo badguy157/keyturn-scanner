@@ -3238,6 +3238,20 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
         if mode == "deep" and len(captured_pages) > 1:
             print(f"[SCAN] Deep mode: analyzing {len(captured_pages)} pages individually")
             
+            # Helper function to create error analysis
+            def create_error_analysis(url: str, page_type: str, error_msg: str) -> Dict[str, Any]:
+                """Create a standardized error analysis dict."""
+                return {
+                    "url": url,
+                    "page_type": page_type,
+                    "summary": f"Analysis error: {error_msg}",
+                    "strengths": [],
+                    "leaks": [],
+                    "quick_wins": [],
+                    "notes": {},
+                    "error": error_msg,
+                }
+            
             # Track page count for garbage collection
             pages_processed = 0
             
@@ -3256,17 +3270,9 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                 if desktop_data.get("error") and mobile_data.get("error"):
                     print(f"[SCAN] Skipping analysis for {page_url} (capture failed)")
                     failed_page_analyses += 1
-                    page_errors.append(f"{page_url}: {desktop_data.get('error')}")
-                    error_analysis = {
-                        "url": page_url,
-                        "page_type": "unknown",
-                        "summary": "Page capture failed",
-                        "strengths": [],
-                        "leaks": [],
-                        "quick_wins": [],
-                        "notes": {},
-                        "error": desktop_data.get("error"),
-                    }
+                    error_msg = desktop_data.get("error", "Unknown capture error")
+                    page_errors.append(f"{page_url}: {error_msg}")
+                    error_analysis = create_error_analysis(page_url, "unknown", f"Page capture failed: {error_msg}")
                     # Store minimal error analysis in database
                     conn.execute(
                         """
@@ -3334,6 +3340,11 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                         )
                         # Touch after analysis completes
                         touch_scan(scan_id)
+                        
+                        # Safety check: ensure analysis is not None before accessing
+                        if analysis is None:
+                            raise RuntimeError("analyze_single_page returned None")
+                        
                         analysis["url"] = page_url  # Ensure URL is set
                         
                         # Check if analysis succeeded (no error field means success)
@@ -3356,37 +3367,29 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                             print(f"[SCAN] Retrying page analysis for {page_url}")
                         else:
                             print(f"[SCAN] Max retries reached for {page_url}, storing error result")
-                            # Create error analysis on final failure
-                            analysis = {
-                                "url": page_url,
-                                "page_type": page_type,
-                                "summary": f"Analysis error after {MAX_RETRIES_PER_PAGE} attempts: {str(page_err)}",
-                                "strengths": [],
-                                "leaks": [],
-                                "quick_wins": [],
-                                "notes": {},
-                                "error": str(page_err),
-                            }
+                            # Create error analysis on final failure using helper
+                            analysis = create_error_analysis(
+                                page_url, 
+                                page_type, 
+                                f"After {MAX_RETRIES_PER_PAGE} attempts: {str(page_err)}"
+                            )
                 
                 # Track success/failure based on actual analysis result
                 # Ensure analysis is never None - create fallback if needed
                 if analysis is None:
-                    analysis = {
-                        "url": page_url,
-                        "page_type": page_type,
-                        "summary": "Unknown error - analysis not completed",
-                        "strengths": [],
-                        "leaks": [],
-                        "quick_wins": [],
-                        "notes": {},
-                        "error": "Unknown error - analysis was None after retry loop",
-                    }
+                    analysis = create_error_analysis(
+                        page_url,
+                        page_type,
+                        "Unknown error - analysis not completed"
+                    )
                 
                 if not analysis.get("error"):
                     successful_page_analyses += 1
                 else:
                     failed_page_analyses += 1
-                    page_errors.append(f"{page_url}: {last_error or 'Unknown error'}")
+                    # Use explicit check for empty string
+                    error_message = last_error if last_error else "Unknown error"
+                    page_errors.append(f"{page_url}: {error_message}")
                 
                 # Store page analysis in database (either success or final error)
                 conn.execute(
@@ -3413,8 +3416,8 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                 conn.commit()
                 
                 # Free memory immediately after storing
-                if analysis is not None:
-                    del analysis
+                # Note: analysis is guaranteed to be a dict at this point, so deletion is safe
+                del analysis
                 del html_content
                 del signals
                 pages_processed += 1
