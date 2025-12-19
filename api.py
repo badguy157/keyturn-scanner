@@ -112,6 +112,9 @@ MAX_PAGES_LIMIT = 50
 # User agent for HTTP requests
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
+# Deep scan configuration
+DEEP_SCAN_TEXT_SAMPLE_LIMIT = 500  # Character limit for text samples in deep scan evidence
+
 RUBRIC_TEXT = """Clinic Patient-Flow Score – Rubric v0.2
 Categories (0–10 each, total 60)
 Final Patient-Flow Score = Total / 6 (0–10 scale)
@@ -355,7 +358,7 @@ class QuickWinItem(BaseModel):
 class PageScanned(BaseModel):
     url: str = Field(..., description="Page URL")
     title: str = Field(..., description="Page title")
-    type: Literal["home", "services", "treatment", "contact", "reviews", "booking", "pricing", "other"] = Field(..., description="Page type")
+    type: Literal["home", "services", "treatment", "contact", "reviews", "booking", "pricing", "about", "faq", "blog", "gallery", "other"] = Field(..., description="Page type")
     page_score: conint(ge=0, le=10) = Field(..., description="Individual page score 0-10")
     top_issue: str = Field(..., description="Top issue on this page")
     top_fix: str = Field(..., description="Top recommended fix for this page")
@@ -1424,7 +1427,7 @@ def ai_score_patient_flow(target_url: str, evidence: Dict[str, Any]) -> Dict[str
             {
                 "url": p.get("url"),
                 "title": p.get("desktop", {}).get("title") or p.get("mobile", {}).get("title"),
-                "text_sample": p.get("desktop", {}).get("text_sample", "")[:500],  # Shortened sample
+                "text_sample": p.get("desktop", {}).get("text_sample", "")[:DEEP_SCAN_TEXT_SAMPLE_LIMIT],
                 "nav_links": p.get("desktop", {}).get("nav_link_texts", [])[:20],
             }
             for p in additional_pages
@@ -4244,6 +4247,44 @@ async function logEvent(eventType, metadata = {}) {
 // Log report_viewed event on page load
 logEvent('report_viewed');
 
+// Helper function to get a friendly label from a URL path
+function getPageLabelFromUrl(url) {
+  try {
+    const urlObj = new URL(url);
+    const path = urlObj.pathname.toLowerCase();
+    
+    if (path === '/' || path === '') return 'Home';
+    if (path.includes('service')) return 'Services';
+    if (path.includes('treatment')) return 'Treatment';
+    if (path.includes('contact')) return 'Contact';
+    if (path.includes('review')) return 'Reviews';
+    if (path.includes('book') || path.includes('appointment')) return 'Booking';
+    if (path.includes('price') || path.includes('cost') || path.includes('pricing')) return 'Pricing';
+    if (path.includes('about')) return 'About';
+    if (path.includes('faq')) return 'FAQ';
+    if (path.includes('blog')) return 'Blog';
+    if (path.includes('gallery')) return 'Gallery';
+    
+    return 'Page';
+  } catch (e) {
+    // If URL parsing fails (e.g., relative URL), try path-based matching
+    const lowerUrl = url.toLowerCase();
+    if (lowerUrl === '/' || lowerUrl === '') return 'Home';
+    if (lowerUrl.includes('service')) return 'Services';
+    if (lowerUrl.includes('treatment')) return 'Treatment';
+    if (lowerUrl.includes('contact')) return 'Contact';
+    if (lowerUrl.includes('review')) return 'Reviews';
+    if (lowerUrl.includes('book') || lowerUrl.includes('appointment')) return 'Booking';
+    if (lowerUrl.includes('price') || lowerUrl.includes('cost') || lowerUrl.includes('pricing')) return 'Pricing';
+    if (lowerUrl.includes('about')) return 'About';
+    if (lowerUrl.includes('faq')) return 'FAQ';
+    if (lowerUrl.includes('blog')) return 'Blog';
+    if (lowerUrl.includes('gallery')) return 'Gallery';
+    
+    return 'Page';
+  }
+}
+
 // Send report email function
 let lastEmailSent = 0;
 const EMAIL_COOLDOWN_MS = 15000; // 15 seconds cooldown
@@ -4534,16 +4575,7 @@ function setList(id, items) {
         const evidencePills = (item.evidence_pages && item.evidence_pages.length) ? 
           `<div class="evidencePages" style="margin-top:6px;">
             ${item.evidence_pages.slice(0, 5).map(url => {
-              const urlObj = new URL(url, window.location.origin);
-              const path = urlObj.pathname;
-              const label = path === '/' ? 'Home' : 
-                            path.includes('service') ? 'Services' :
-                            path.includes('treatment') ? 'Treatment' :
-                            path.includes('contact') ? 'Contact' :
-                            path.includes('review') ? 'Reviews' :
-                            path.includes('book') ? 'Booking' :
-                            path.includes('price') || path.includes('cost') ? 'Pricing' :
-                            'Page';
+              const label = getPageLabelFromUrl(url);
               return `<span class="evidencePill" data-url="${esc(url)}">${esc(label)}</span>`;
             }).join('')}
           </div>` : '';
@@ -4606,16 +4638,7 @@ function setList(id, items) {
       const evidencePills = (item.evidence_pages && item.evidence_pages.length) ? 
         `<div class="evidencePages" style="margin-top:6px;">
           ${item.evidence_pages.slice(0, 5).map(url => {
-            const urlObj = new URL(url, window.location.origin);
-            const path = urlObj.pathname;
-            const label = path === '/' ? 'Home' : 
-                          path.includes('service') ? 'Services' :
-                          path.includes('treatment') ? 'Treatment' :
-                          path.includes('contact') ? 'Contact' :
-                          path.includes('review') ? 'Reviews' :
-                          path.includes('book') ? 'Booking' :
-                          path.includes('price') || path.includes('cost') ? 'Pricing' :
-                          'Page';
+            const label = getPageLabelFromUrl(url);
             return `<span class="evidencePill" data-url="${esc(url)}">${esc(label)}</span>`;
           }).join('')}
         </div>` : '';
@@ -5090,16 +5113,7 @@ function renderCrossPatterns(patterns) {
     const evidencePills = (pattern.evidence_pages && pattern.evidence_pages.length) ?
       `<div class="evidencePages">
         ${pattern.evidence_pages.slice(0, 5).map(url => {
-          const urlObj = new URL(url, window.location.origin);
-          const path = urlObj.pathname;
-          const label = path === '/' ? 'Home' : 
-                        path.includes('service') ? 'Services' :
-                        path.includes('treatment') ? 'Treatment' :
-                        path.includes('contact') ? 'Contact' :
-                        path.includes('review') ? 'Reviews' :
-                        path.includes('book') ? 'Booking' :
-                        path.includes('price') || path.includes('cost') ? 'Pricing' :
-                        'Page';
+          const label = getPageLabelFromUrl(url);
           return `<span class="evidencePill">${esc(label)}</span>`;
         }).join('')}
       </div>` : '';
