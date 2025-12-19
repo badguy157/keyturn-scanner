@@ -3375,19 +3375,20 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                             )
                 
                 # Track success/failure based on actual analysis result
-                # Ensure analysis is never None - create fallback if needed
+                # Defensive: create fallback if analysis is somehow None (should not happen)
                 if analysis is None:
+                    print(f"[SCAN] WARNING: Unexpected None analysis for {page_url}, creating fallback error")
                     analysis = create_error_analysis(
                         page_url,
                         page_type,
-                        "Unknown error - analysis not completed"
+                        "Unexpected error - analysis not completed after retry loop"
                     )
                 
                 if not analysis.get("error"):
                     successful_page_analyses += 1
                 else:
                     failed_page_analyses += 1
-                    # Use explicit check for empty string
+                    # Handles None, empty string, and other falsy values
                     error_message = last_error if last_error else "Unknown error"
                     page_errors.append(f"{page_url}: {error_message}")
                 
@@ -3409,14 +3410,13 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                             "mobile": mobile_data.get("screenshot_urls", []),
                         }),
                         db_safe(signals),
-                        db_safe(analysis),  # analysis is guaranteed to be a dict now
+                        db_safe(analysis),
                         now_iso(),
                     ),
                 )
                 conn.commit()
                 
                 # Free memory immediately after storing
-                # Note: analysis is guaranteed to be a dict at this point, so deletion is safe
                 del analysis
                 del html_content
                 del signals
