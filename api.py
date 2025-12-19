@@ -244,6 +244,15 @@ def db_safe(value: Any) -> Any:
     - Returns primitives (str, int, float, bool, None) unchanged
     - Converts exceptions to their string representation
     
+    Args:
+        value: Any value to make safe for SQLite binding
+    
+    Returns:
+        For primitives (str, int, float, bool, None): the original value unchanged
+        For exceptions: string representation via str()
+        For dict/list/other objects: JSON string via json.dumps(..., default=str)
+        On serialization failure: string representation via str()
+    
     This prevents sqlite3.InterfaceError: Error binding parameter ... unsupported type
     """
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -253,8 +262,10 @@ def db_safe(value: Any) -> Any:
     # For dict, list, or any other complex object, serialize to JSON
     try:
         return json.dumps(value, default=str)
-    except (TypeError, ValueError) as e:
+    except (TypeError, ValueError):
         # Fallback: convert to string if JSON serialization fails
+        # This shouldn't happen often since we use default=str, but it's a safety net
+        print(f"[DB_SAFE] Warning: JSON serialization failed for {type(value).__name__}, using str() fallback")
         return str(value)
 
 
