@@ -103,8 +103,10 @@ MAX_PUBLIC_ID_ATTEMPTS = 10
 SCAN_STATUS_DONE = "done"
 SCAN_STATUS_ERROR = "error"
 SCAN_STATUS_QUEUED = "queued"
-SCAN_STATUS_RUNNING = "running"
-SCAN_STATUS_SCORING = "scoring"
+SCAN_STATUS_RUNNING = "running"  # Deprecated - use SCANNING instead
+SCAN_STATUS_SCANNING = "scanning"  # Page capture and analysis
+SCAN_STATUS_SCORING = "scoring"  # Final synthesis
+SCAN_STATUS_TIMED_OUT = "timed_out"
 
 # Scan mode defaults
 SCAN_MODE_QUICK = "quick"
@@ -124,6 +126,7 @@ DEEP_SCAN_TEXT_SAMPLE_LIMIT = 500  # Character limit for text samples in deep sc
 
 # Scoring lifecycle configuration
 SCORING_WATCHDOG_TIMEOUT_SECONDS = 300  # 5 minutes - mark scoring as timed out if no update
+SCANNING_WATCHDOG_TIMEOUT_SECONDS = 600  # 10 minutes - for page capture/analysis (longer for many pages)
 ERROR_MESSAGE_MAX_LENGTH = 5000  # Maximum length for error messages stored in database
 
 # Configure mimetypes for better file type detection
@@ -267,6 +270,29 @@ def db_safe(value: Any) -> Any:
         # This can happen with circular references or other non-serializable edge cases
         print(f"[DB_SAFE] Warning: JSON serialization failed for {type(value).__name__}, using str() fallback")
         return str(value)
+
+
+def touch_scan(scan_id: str) -> None:
+    """Update the updated_at timestamp for a scan to prevent watchdog false positives.
+    
+    Call this function whenever meaningful progress is made during a scan, such as:
+    - After capturing/analyzing each page
+    - Before/after making OpenAI API calls
+    - Any time progress_step or progress_pct changes
+    
+    This ensures the watchdog doesn't timeout scans that are actively processing.
+    
+    Args:
+        scan_id: The ID of the scan to touch
+    """
+    try:
+        conn = db()
+        conn.execute("UPDATE scans SET updated_at=? WHERE id=?", (now_iso(), scan_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        # Don't fail the scan if touch fails
+        print(f"[TOUCH_SCAN] Warning: Failed to update timestamp for {scan_id}: {e}")
 
 
 def _ensure_columns() -> None:
@@ -2450,6 +2476,10 @@ Return output that fits the required JSON schema.
 
     for model in models_to_try:
         try:
+            # Touch before OpenAI call to prevent timeout
+            if scan_id:
+                touch_scan(scan_id)
+            
             # Option A: Structured outputs (preferred)
             if hasattr(client.responses, "parse"):
                 try:
@@ -2493,6 +2523,10 @@ Return output that fits the required JSON schema.
                     if not m:
                         raise RuntimeError(f"AI returned non-JSON. First 400 chars: {raw[:400]}")
                     data = json.loads(m.group(0))
+            
+            # Touch after OpenAI call completes
+            if scan_id:
+                touch_scan(scan_id)
 
             scores = (data.get("scores") or {}) if isinstance(data, dict) else {}
             fixed_scores = {
@@ -2571,7 +2605,7 @@ Return output that fits the required JSON schema.
                         conn = db()
                         conn.execute(
                             "UPDATE scans SET status=?, error=?, finished_at=?, updated_at=?, progress_step=? WHERE id=?",
-                            ("timed_out", "OpenAI request timed out (no retries).", now_iso(), now_iso(), "timeout", scan_id)
+                            (SCAN_STATUS_TIMED_OUT, "OpenAI request timed out (no retries).", now_iso(), now_iso(), "timeout", scan_id)
                         )
                         conn.commit()
                         conn.close()
@@ -3028,10 +3062,10 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
         if max_pages is None:
             max_pages = get_default_max_pages(mode)
         
-        # Set started_at and status=running
+        # Set started_at and status=scanning
         conn.execute(
             "UPDATE scans SET status=?, updated_at=?, started_at=?, progress_step=?, progress_pct=? WHERE id=?",
-            (SCAN_STATUS_RUNNING, now_iso(), now_iso(), "capturing_pages", 10, scan_id)
+            (SCAN_STATUS_SCANNING, now_iso(), now_iso(), "capturing_pages", 10, scan_id)
         )
         conn.commit()
 
@@ -3056,6 +3090,8 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                 page_data = capture_page(page_url, scan_dir, i)
                 captured_pages.append(page_data)
                 pages_scanned += 1
+                # Touch scan after each page to prevent timeout
+                touch_scan(scan_id)
             except Exception as page_err:
                 print(f"[SCAN] Failed to capture {page_url}: {page_err}")
                 # Record failure but continue with other pages
@@ -3065,6 +3101,8 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                     "desktop": {"error": str(page_err)},
                     "mobile": {"error": str(page_err)},
                 })
+                # Touch scan even on error
+                touch_scan(scan_id)
         
         # Build evidence from captured pages
         if not captured_pages:
@@ -3157,6 +3195,8 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                     
                     # Analyze this page
                     print(f"[SCAN] Analyzing page {i+1}/{len(captured_pages)}: {page_url} ({page_type})")
+                    # Touch before analysis to prevent timeout
+                    touch_scan(scan_id)
                     analysis = analyze_single_page(
                         page_url=page_url,
                         page_type=page_type,
@@ -3165,6 +3205,8 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                         screenshot_mobile=screenshot_mobile,
                         signals=signals,
                     )
+                    # Touch after analysis completes
+                    touch_scan(scan_id)
                     analysis["url"] = page_url  # Ensure URL is set
                     page_analyses.append(analysis)
                     
@@ -3213,7 +3255,11 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                 str(url)
             )
             
+            # Touch before synthesis to prevent timeout
+            touch_scan(scan_id)
             synthesis = synthesize_deep_scan(page_analyses, clinic_name)
+            # Touch after synthesis completes
+            touch_scan(scan_id)
             
             # Store synthesis in database
             conn.execute(
@@ -3238,7 +3284,11 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
             print(f"[SCAN] Deep scan synthesis complete and stored in database")
 
         # Score the pages (this provides backward compatibility)
+        # Touch before scoring to prevent timeout
+        touch_scan(scan_id)
         output = analyze_pages(captured_pages, str(url), scan_id=scan_id)
+        # Touch after scoring completes
+        touch_scan(scan_id)
 
         # Generate slug from clinic_name or fallback to domain
         clinic_name = output.get("clinic_name", "")
@@ -4143,10 +4193,10 @@ def get_scan(scan_id: str):
         conn.close()
         raise HTTPException(status_code=404, detail="Scan not found")
 
-    # Watchdog: check if scan is stuck in scoring status
+    # Watchdog: check if scan is stuck in scanning or scoring status
     status = row["status"]
     updated_at_str = row["updated_at"]
-    if status == SCAN_STATUS_SCORING and updated_at_str:
+    if status in (SCAN_STATUS_SCANNING, SCAN_STATUS_SCORING) and updated_at_str:
         try:
             # Parse updated_at timestamp (ISO format with Z suffix)
             # Remove Z and make it timezone-naive for comparison with utcnow()
@@ -4154,14 +4204,20 @@ def get_scan(scan_id: str):
             now = datetime.utcnow()
             age_seconds = (now - updated_at).total_seconds()
             
-            # If scoring has been running for more than the configured timeout, mark as error
-            if age_seconds > SCORING_WATCHDOG_TIMEOUT_SECONDS:
-                error_msg = f"Scoring timed out (no update for {int(age_seconds)} seconds)"
+            # Determine timeout threshold based on current status
+            if status == SCAN_STATUS_SCANNING:
+                timeout_threshold = SCANNING_WATCHDOG_TIMEOUT_SECONDS
+            else:  # SCAN_STATUS_SCORING
+                timeout_threshold = SCORING_WATCHDOG_TIMEOUT_SECONDS
+            
+            # If scan has been in this status without update beyond threshold, mark as timed_out
+            if age_seconds > timeout_threshold:
+                error_msg = f"{status.capitalize()} timed out (no update for {int(age_seconds)} seconds)"
                 print(f"[WATCHDOG] Marking scan {scan_id} as timed out: {error_msg}")
                 
                 conn.execute(
                     "UPDATE scans SET status=?, error=?, finished_at=?, updated_at=? WHERE id=?",
-                    (SCAN_STATUS_ERROR, error_msg, now_iso(), now_iso(), scan_id)
+                    (SCAN_STATUS_TIMED_OUT, error_msg, now_iso(), now_iso(), scan_id)
                 )
                 conn.commit()
                 
