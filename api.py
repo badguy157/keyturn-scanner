@@ -320,6 +320,51 @@ def db_safe(value: Any) -> Any:
         return str(value)
 
 
+def row_to_dict(row):
+    """
+    Convert a sqlite3.Row to a dictionary.
+    
+    Args:
+        row: A sqlite3.Row object or None
+    
+    Returns:
+        A dictionary with column names as keys, or None if row is None
+    """
+    if row is None:
+        return None
+    return {k: row[k] for k in row.keys()}
+
+
+def maybe_json(v):
+    """
+    Decode JSON strings back into Python objects.
+    
+    This is the inverse of db_safe() for fields that were JSON-serialized
+    before storing in the database.
+    
+    Args:
+        v: A value that might be a JSON string
+    
+    Returns:
+        - If v is None: returns None
+        - If v is already a dict or list: returns v unchanged
+        - If v is a JSON string (starts with { or [): attempts to parse and return the object
+        - Otherwise: returns v unchanged
+    """
+    if v is None:
+        return None
+    if isinstance(v, (dict, list)):
+        return v
+    if isinstance(v, str):
+        s = v.strip()
+        if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+            try:
+                return json.loads(s)
+            except:
+                return v
+    return v
+
+
 def touch_scan(scan_id: str) -> None:
     """Update the updated_at timestamp for a scan to prevent watchdog false positives.
     
@@ -4467,7 +4512,10 @@ def get_scan(scan_id: str):
             (scan_id,)
         ).fetchone()
         
-        if page_rows or summary_row:
+        # Convert summary_row to dict to avoid sqlite3.Row.get() issue
+        summary = row_to_dict(summary_row) or {}
+        
+        if page_rows or summary:
             deep_scan_data = {}
             
             if page_rows:
@@ -4484,14 +4532,14 @@ def get_scan(scan_id: str):
                     for r in page_rows
                 ]
             
-            if summary_row:
+            if summary:
                 deep_scan_data["synthesis"] = {
-                    "executive_summary": json.loads(summary_row["executive_summary"]) if summary_row["executive_summary"] else None,
-                    "what_to_fix_first": summary_row.get("what_to_fix_first"),
-                    "journey_map": json.loads(summary_row["journey_map"]) if summary_row["journey_map"] else None,
-                    "action_plan": json.loads(summary_row["action_plan"]) if summary_row["action_plan"] else None,
-                    "roadmap_90d": json.loads(summary_row["roadmap_90d"]) if summary_row["roadmap_90d"] else None,
-                    "coverage": json.loads(summary_row["coverage"]) if summary_row["coverage"] else None,
+                    "executive_summary": maybe_json(summary.get("executive_summary")),
+                    "what_to_fix_first": maybe_json(summary.get("what_to_fix_first")),
+                    "journey_map": maybe_json(summary.get("journey_map")),
+                    "action_plan": maybe_json(summary.get("action_plan")),
+                    "roadmap_90d": maybe_json(summary.get("roadmap_90d")),
+                    "coverage": maybe_json(summary.get("coverage")),
                 }
     
     conn.close()
@@ -4652,7 +4700,10 @@ def get_report_json(scan_id: str):
             (scan_id,)
         ).fetchone()
         
-        if page_rows or summary_row:
+        # Convert summary_row to dict to avoid sqlite3.Row.get() issue
+        summary = row_to_dict(summary_row) or {}
+        
+        if page_rows or summary:
             deep_scan_data = {}
             
             if page_rows:
@@ -4669,14 +4720,14 @@ def get_report_json(scan_id: str):
                     for r in page_rows
                 ]
             
-            if summary_row:
+            if summary:
                 deep_scan_data["synthesis"] = {
-                    "executive_summary": json.loads(summary_row["executive_summary"]) if summary_row["executive_summary"] else None,
-                    "what_to_fix_first": summary_row.get("what_to_fix_first"),
-                    "journey_map": json.loads(summary_row["journey_map"]) if summary_row["journey_map"] else None,
-                    "action_plan": json.loads(summary_row["action_plan"]) if summary_row["action_plan"] else None,
-                    "roadmap_90d": json.loads(summary_row["roadmap_90d"]) if summary_row["roadmap_90d"] else None,
-                    "coverage": json.loads(summary_row["coverage"]) if summary_row["coverage"] else None,
+                    "executive_summary": maybe_json(summary.get("executive_summary")),
+                    "what_to_fix_first": maybe_json(summary.get("what_to_fix_first")),
+                    "journey_map": maybe_json(summary.get("journey_map")),
+                    "action_plan": maybe_json(summary.get("action_plan")),
+                    "roadmap_90d": maybe_json(summary.get("roadmap_90d")),
+                    "coverage": maybe_json(summary.get("coverage")),
                 }
     
     conn.close()
