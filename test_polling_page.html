@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Polling Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        .status {
+            padding: 20px;
+            margin: 20px 0;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            background: #f9f9f9;
+        }
+        .log {
+            padding: 10px;
+            margin: 10px 0;
+            background: #eee;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .error {
+            color: red;
+        }
+        .success {
+            color: green;
+        }
+    </style>
+</head>
+<body>
+    <h1>Polling Test Page</h1>
+    <div class="status">
+        <h2>Status: <span id="status">Initializing...</span></h2>
+        <p>Progress: <span id="progress">0%</span></p>
+        <p>Step: <span id="step">-</span></p>
+        <p>Error: <span id="error">-</span></p>
+    </div>
+    <div class="log" id="log"></div>
+
+    <script>
+        const scanId = 'test-scan-123';
+        const logEl = document.getElementById('log');
+        
+        function log(msg, className = '') {
+            const div = document.createElement('div');
+            div.className = className;
+            div.textContent = new Date().toISOString() + ' - ' + msg;
+            logEl.appendChild(div);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        async function tick() {
+            let shouldContinuePolling = false;
+            let backoffDelay = 1200;
+            
+            try {
+                log('Fetching status from /api/scan/' + scanId + '/status');
+                
+                const statusRes = await fetch('/api/scan/' + scanId + '/status');
+                const statusText = await statusRes.text();
+                
+                log('Response status: ' + statusRes.status);
+                log('Response text length: ' + statusText.length + ' bytes');
+                
+                if (!statusRes.ok) {
+                    const errorMsg = `Server error ${statusRes.status}`;
+                    log(errorMsg + ': ' + statusText, 'error');
+                    document.getElementById('status').textContent = 'Error: ' + errorMsg;
+                    
+                    if (statusRes.status === 404) {
+                        log('Scan not found, stopping polling', 'error');
+                        return;
+                    }
+                    
+                    shouldContinuePolling = true;
+                    backoffDelay = 5000;
+                    return;
+                }
+                
+                const contentType = statusRes.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    log('Non-JSON response: ' + contentType, 'error');
+                    document.getElementById('status').textContent = 'Error: Non-JSON response';
+                    return;
+                }
+                
+                let statusData;
+                try {
+                    statusData = JSON.parse(statusText);
+                    log('Parsed JSON: ' + JSON.stringify(statusData), 'success');
+                } catch (parseErr) {
+                    log('JSON parse error: ' + parseErr, 'error');
+                    document.getElementById('status').textContent = 'Error: Parse failed';
+                    return;
+                }
+                
+                // Update UI
+                document.getElementById('status').textContent = statusData.status || 'unknown';
+                document.getElementById('progress').textContent = (statusData.progress_pct || 0) + '%';
+                document.getElementById('step').textContent = statusData.progress_step || '-';
+                document.getElementById('error').textContent = statusData.error || '-';
+                
+                const st = statusData.status || 'loading';
+                if (st === 'queued' || st === 'running' || st === 'scanning' || st === 'scoring') {
+                    log('Status is ' + st + ', continuing polling');
+                    shouldContinuePolling = true;
+                } else {
+                    log('Status is ' + st + ', stopping polling', 'success');
+                    shouldContinuePolling = false;
+                }
+                
+            } catch (error) {
+                log('Error: ' + error.message, 'error');
+                document.getElementById('status').textContent = 'Error: ' + error.message;
+                shouldContinuePolling = true;
+                backoffDelay = 5000;
+            } finally {
+                if (shouldContinuePolling) {
+                    log('Scheduling next poll in ' + backoffDelay + 'ms');
+                    setTimeout(tick, backoffDelay);
+                }
+            }
+        }
+        
+        // Start polling
+        log('Starting polling test', 'success');
+        tick();
+    </script>
+</body>
+</html>
