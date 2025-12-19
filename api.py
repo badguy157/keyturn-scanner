@@ -236,6 +236,39 @@ def db() -> sqlite3.Connection:
     return conn
 
 
+def db_safe(value: Any) -> Any:
+    """
+    Make a value safe for SQLite binding.
+    
+    - Serializes dict/list/complex objects using json.dumps(..., default=str)
+    - Returns primitives (str, int, float, bool, None) unchanged
+    - Converts exceptions to their string representation
+    
+    Args:
+        value: Any value to make safe for SQLite binding
+    
+    Returns:
+        For primitives (str, int, float, bool, None): the original value unchanged
+        For exceptions: string representation via str()
+        For dict/list/other objects: JSON string via json.dumps(..., default=str)
+        On serialization failure: string representation via str()
+    
+    This prevents sqlite3.InterfaceError: Error binding parameter ... unsupported type
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Exception):
+        return str(value)
+    # For dict, list, or any other complex object, serialize to JSON
+    try:
+        return json.dumps(value, default=str)
+    except (TypeError, ValueError):
+        # Fallback: convert to string if JSON serialization fails
+        # This can happen with circular references or other non-serializable edge cases
+        print(f"[DB_SAFE] Warning: JSON serialization failed for {type(value).__name__}, using str() fallback")
+        return str(value)
+
+
 def _ensure_columns() -> None:
     conn = db()
     try:
@@ -3068,7 +3101,7 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
         # Update status to scoring with progress tracking
         conn.execute(
             "UPDATE scans SET status=?, updated_at=?, evidence_json=?, pages_scanned=?, progress_step=?, progress_pct=? WHERE id=?",
-            (SCAN_STATUS_SCORING, now_iso(), json.dumps(evidence), pages_scanned, "calling_model", 60, scan_id),
+            (SCAN_STATUS_SCORING, now_iso(), db_safe(evidence), pages_scanned, "calling_model", 60, scan_id),
         )
         conn.commit()
 
@@ -3148,12 +3181,12 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                             title[:200] if title else None,
                             page_type,
                             0,  # is_mobile = False for desktop analysis
-                            json.dumps({
+                            db_safe({
                                 "desktop": desktop_data.get("screenshot_urls", []),
                                 "mobile": mobile_data.get("screenshot_urls", []),
                             }),
-                            json.dumps(signals),
-                            json.dumps(analysis),
+                            db_safe(signals),
+                            db_safe(analysis),
                             now_iso(),
                         ),
                     )
@@ -3191,12 +3224,12 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                 """,
                 (
                     scan_id,
-                    json.dumps(synthesis.get("executive_summary", [])),
+                    db_safe(synthesis.get("executive_summary", [])),
                     synthesis.get("what_to_fix_first"),
-                    json.dumps(synthesis.get("journey_map", [])),
-                    json.dumps(synthesis.get("action_plan", [])),
-                    json.dumps(synthesis.get("roadmap_90d", [])),
-                    json.dumps(synthesis.get("coverage", {})),
+                    db_safe(synthesis.get("journey_map", [])),
+                    db_safe(synthesis.get("action_plan", [])),
+                    db_safe(synthesis.get("roadmap_90d", [])),
+                    db_safe(synthesis.get("coverage", {})),
                     now_iso(),
                 ),
             )
@@ -3220,7 +3253,7 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
         # Update scans with slug and pages_scanned before marking as done
         conn.execute(
             "UPDATE scans SET status=?, updated_at=?, finished_at=?, evidence_json=?, score_json=?, error=?, slug=?, pages_scanned=?, progress_step=?, progress_pct=? WHERE id=?",
-            (SCAN_STATUS_DONE, now_iso(), now_iso(), json.dumps(evidence), json.dumps(output), None, slug, pages_scanned, "completed", 100, scan_id),
+            (SCAN_STATUS_DONE, now_iso(), now_iso(), db_safe(evidence), db_safe(output), None, slug, pages_scanned, "completed", 100, scan_id),
         )
         conn.commit()
         
@@ -3232,7 +3265,7 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
         # Log scan_completed event
         conn.execute(
             "INSERT INTO events (event_type, scan_id, public_id, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
-            ("scan_completed", scan_id, public_id, json.dumps({"score": output.get("patient_flow_score_10"), "mode": mode, "pages_scanned": pages_scanned}), now_iso()),
+            ("scan_completed", scan_id, public_id, db_safe({"score": output.get("patient_flow_score_10"), "mode": mode, "pages_scanned": pages_scanned}), now_iso()),
         )
         conn.commit()
         
@@ -3263,7 +3296,7 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                     # Log event
                     conn.execute(
                         "INSERT INTO events (event_type, scan_id, public_id, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
-                        ("email_scan_receipt_sent", scan_id, public_id, json.dumps({"email": scan_email, "message_id": result.get("message_id")}), now_iso()),
+                        ("email_scan_receipt_sent", scan_id, public_id, db_safe({"email": scan_email, "message_id": result.get("message_id")}), now_iso()),
                     )
                     conn.commit()
                 else:
@@ -4083,7 +4116,7 @@ def create_scan(req: ScanRequest):
         # Log scan_started event
         conn.execute(
             "INSERT INTO events (event_type, scan_id, public_id, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
-            ("scan_started", scan_id, public_id, json.dumps({"url": str(req.url), "email": email, "mode": mode, "max_pages": max_pages}), now_iso()),
+            ("scan_started", scan_id, public_id, db_safe({"url": str(req.url), "email": email, "mode": mode, "max_pages": max_pages}), now_iso()),
         )
         conn.commit()
     finally:
@@ -4366,7 +4399,7 @@ def log_event(req: EventRequest):
     try:
         conn.execute(
             "INSERT INTO events (event_type, scan_id, public_id, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
-            (req.event_type, req.scan_id, req.public_id, json.dumps(req.metadata) if req.metadata else None, now_iso()),
+            (req.event_type, req.scan_id, req.public_id, db_safe(req.metadata) if req.metadata else None, now_iso()),
         )
         conn.commit()
         return {"ok": True}
@@ -4437,7 +4470,7 @@ def email_report(req: EmailReportRequest, request: Request):
         try:
             conn.execute(
                 "INSERT INTO events (event_type, scan_id, public_id, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
-                ("email_report_sent", row["id"], req.report_id, json.dumps({"email": req.email, "message_id": result.get("message_id")}), now_iso()),
+                ("email_report_sent", row["id"], req.report_id, db_safe({"email": req.email, "message_id": result.get("message_id")}), now_iso()),
             )
             conn.commit()
         finally:
@@ -4518,7 +4551,7 @@ def email_scan_receipt(req: EmailReportRequest, request: Request):
         try:
             conn.execute(
                 "INSERT INTO events (event_type, scan_id, public_id, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
-                ("email_scan_receipt_sent", row["id"], req.report_id, json.dumps({"email": req.email, "message_id": result.get("message_id")}), now_iso()),
+                ("email_scan_receipt_sent", row["id"], req.report_id, db_safe({"email": req.email, "message_id": result.get("message_id")}), now_iso()),
             )
             conn.commit()
         finally:
