@@ -112,6 +112,9 @@ MAX_PAGES_LIMIT = 50
 # User agent for HTTP requests
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
+# Deep scan configuration
+DEEP_SCAN_TEXT_SAMPLE_LIMIT = 500  # Character limit for text samples in deep scan evidence
+
 RUBRIC_TEXT = """Clinic Patient-Flow Score – Rubric v0.2
 Categories (0–10 each, total 60)
 Final Patient-Flow Score = Total / 6 (0–10 scale)
@@ -349,6 +352,45 @@ class QuickWinItem(BaseModel):
     action: str = Field(..., description="The action text describing what to do")
     impact: Literal["High", "Med", "Low"] = Field(..., description="Impact level: High, Med, or Low")
     effort: Literal["Low", "Med", "High"] = Field(..., description="Effort level: Low, Med, or High")
+    evidence_pages: Optional[List[str]] = Field(default=None, description="URLs of pages demonstrating this issue (for deep scan)")
+
+
+class PageScanned(BaseModel):
+    url: str = Field(..., description="Page URL")
+    title: str = Field(..., description="Page title")
+    type: Literal["home", "services", "treatment", "contact", "reviews", "booking", "pricing", "about", "faq", "blog", "gallery", "other"] = Field(..., description="Page type")
+    page_score: conint(ge=0, le=10) = Field(..., description="Individual page score 0-10")
+    top_issue: str = Field(..., description="Top issue on this page")
+    top_fix: str = Field(..., description="Top recommended fix for this page")
+
+
+class PageCritique(BaseModel):
+    page_url: str = Field(..., description="URL of the page being critiqued")
+    page_title: str = Field(..., description="Title of the page")
+    whats_working: List[str] = Field(..., description="What's working well on this page")
+    whats_hurting: List[str] = Field(..., description="What's hurting conversions on this page")
+    fixes: List[str] = Field(..., description="Specific fixes for this page")
+
+
+class CrossPagePattern(BaseModel):
+    pattern: str = Field(..., description="A sitewide pattern found across multiple pages")
+    evidence_pages: List[str] = Field(..., description="URLs where this pattern appears")
+
+
+class StrengthItem(BaseModel):
+    strength: str = Field(..., description="Description of the strength")
+    evidence_pages: Optional[List[str]] = Field(default=None, description="URLs demonstrating this strength (for deep scan)")
+
+
+class LeakItem(BaseModel):
+    leak: str = Field(..., description="Description of the booking leak")
+    evidence_pages: Optional[List[str]] = Field(default=None, description="URLs demonstrating this leak (for deep scan)")
+
+
+class DeepScanSummary(BaseModel):
+    executive_summary: List[str] = Field(..., description="3-6 bullet points summarizing key findings")
+    biggest_booking_leak: str = Field(..., description="The single biggest issue causing lost bookings")
+    top_3_fixes: List[str] = Field(..., description="Top 3 recommended fixes in priority order")
 
 
 class PatientFlowAIOutput(BaseModel):
@@ -357,6 +399,14 @@ class PatientFlowAIOutput(BaseModel):
     strengths: List[str] = Field(default_factory=list)
     leaks: List[str] = Field(default_factory=list)
     quick_wins: List[QuickWinItem] = Field(default_factory=list)
+    # Deep scan fields (optional, only populated for deep scans)
+    summary: Optional[DeepScanSummary] = Field(default=None, description="Executive summary for deep scans")
+    pages_scanned: Optional[List[PageScanned]] = Field(default=None, description="Details about each scanned page (deep scan only)")
+    page_critiques: Optional[List[PageCritique]] = Field(default=None, description="Per-page critiques (deep scan only)")
+    cross_page_patterns: Optional[List[CrossPagePattern]] = Field(default=None, description="Sitewide patterns (deep scan only)")
+    strengths_detailed: Optional[List[StrengthItem]] = Field(default=None, description="Detailed strengths with evidence (deep scan only)")
+    leaks_detailed: Optional[List[LeakItem]] = Field(default=None, description="Detailed leaks with evidence (deep scan only)")
+    quick_wins_detailed: Optional[List[QuickWinItem]] = Field(default=None, description="Detailed quick wins with evidence (deep scan only)")
 
 
 def _model_to_dict(m: Any) -> Dict[str, Any]:
@@ -1305,9 +1355,16 @@ def ai_score_patient_flow(target_url: str, evidence: Dict[str, Any]) -> Dict[str
 
     home_d = evidence.get("home_desktop", {})
     home_m = evidence.get("home_mobile", {})
+    
+    # Detect if this is a deep scan
+    scan_metadata = evidence.get("scan_metadata", {})
+    is_deep_scan = scan_metadata.get("mode") == "deep" and scan_metadata.get("pages_scanned", 1) > 1
+    additional_pages = evidence.get("additional_pages", [])
 
     evidence_payload = {
         "target_url": target_url,
+        "scan_mode": "deep" if is_deep_scan else "quick",
+        "pages_scanned": scan_metadata.get("pages_scanned", 1),
         "home_desktop": {
             k: home_d.get(k)
             for k in [
@@ -1363,8 +1420,83 @@ def ai_score_patient_flow(target_url: str, evidence: Dict[str, Any]) -> Dict[str
             "booking_scoring_hint": "Booking path is about discoverability + clicks. A long booking form can be noted as a leak without tanking booking_path.",
         },
     }
+    
+    # Add additional pages for deep scan
+    if is_deep_scan and additional_pages:
+        evidence_payload["additional_pages"] = [
+            {
+                "url": p.get("url"),
+                "title": p.get("desktop", {}).get("title") or p.get("mobile", {}).get("title"),
+                "text_sample": p.get("desktop", {}).get("text_sample", "")[:DEEP_SCAN_TEXT_SAMPLE_LIMIT],
+                "nav_links": p.get("desktop", {}).get("nav_link_texts", [])[:20],
+            }
+            for p in additional_pages
+        ]
 
-    sys_prompt = f"""
+    # Build prompt based on scan mode
+    if is_deep_scan:
+        sys_prompt = f"""
+You are scoring a clinic website using this rubric ONLY. This is a DEEP SCAN analyzing multiple pages.
+
+{RUBRIC_TEXT}
+
+{WORKED_EXAMPLES}
+
+Scoring rules:
+- Each category score must be an integer 0–10.
+- Use calibration examples to avoid score inflation: 8+ should be rare unless it truly matches the GOLD example vibe.
+- Booking path is about how obvious + low-click the "Book/Consult" path is. If the form itself is long, keep booking_path high if the path is still obvious; list form friction under leaks/quick_wins.
+- For deep scans, analyze patterns across ALL pages provided, not just the homepage.
+
+DEEP SCAN REQUIREMENTS:
+You MUST provide the following in your response:
+
+1. summary: Executive summary with:
+   - executive_summary: 3-6 bullet points of key findings
+   - biggest_booking_leak: The single biggest issue causing lost bookings
+   - top_3_fixes: Top 3 recommended fixes in priority order
+
+2. pages_scanned: Array of page details (one per scanned page) with:
+   - url: Full URL of the page
+   - title: Page title
+   - type: One of [home, services, treatment, contact, reviews, booking, pricing, other]
+   - page_score: 0-10 score for this specific page
+   - top_issue: The top issue on this page
+   - top_fix: The top recommended fix for this page
+
+3. page_critiques: One entry per scanned page with:
+   - page_url: URL of the page
+   - page_title: Title of the page
+   - whats_working: List of 2-4 things working well
+   - whats_hurting: List of 2-4 things hurting conversions
+   - fixes: List of 2-4 specific actionable fixes
+
+4. cross_page_patterns: Minimum 5 sitewide patterns with:
+   - pattern: Description of the pattern
+   - evidence_pages: List of URLs where this pattern appears
+
+5. strengths_detailed: Minimum 6 strengths, each with:
+   - strength: Description
+   - evidence_pages: List of page URLs demonstrating this (REQUIRED - must reference actual scanned URLs)
+
+6. leaks_detailed: Minimum 8 booking leaks, each with:
+   - leak: Description
+   - evidence_pages: List of page URLs demonstrating this (REQUIRED - must reference actual scanned URLs)
+
+7. quick_wins_detailed: Minimum 10 quick wins, each with:
+   - action: Clear, actionable instruction (be specific: "do this")
+   - impact: High, Med, or Low
+   - effort: Low, Med, or High
+   - evidence_pages: List of page URLs where this applies (REQUIRED - must reference actual scanned URLs)
+
+CRITICAL: Every item in strengths_detailed, leaks_detailed, and quick_wins_detailed MUST include evidence_pages with at least one actual URL from the scanned pages. Do not leave evidence_pages empty or null.
+
+Also provide the legacy fields (strengths, leaks, quick_wins) as simple lists for backward compatibility.
+
+Return output that fits the required JSON schema.
+""".strip()
+    else:
+        sys_prompt = f"""
 You are scoring a clinic website using this rubric ONLY.
 
 {RUBRIC_TEXT}
@@ -1493,8 +1625,26 @@ Return output that fits the required JSON schema.
                     "home_desktop_final_url": home_d.get("final_url"),
                     "home_mobile_final_url": home_m.get("final_url"),
                     "structured_output": bool(hasattr(client.responses, "parse")),
+                    "is_deep_scan": is_deep_scan,
                 },
             }
+            
+            # Add deep scan specific fields if present
+            if is_deep_scan:
+                if data.get("summary"):
+                    out["summary"] = data["summary"]
+                if data.get("pages_scanned"):
+                    out["pages_scanned"] = data["pages_scanned"]
+                if data.get("page_critiques"):
+                    out["page_critiques"] = data["page_critiques"]
+                if data.get("cross_page_patterns"):
+                    out["cross_page_patterns"] = data["cross_page_patterns"]
+                if data.get("strengths_detailed"):
+                    out["strengths_detailed"] = data["strengths_detailed"]
+                if data.get("leaks_detailed"):
+                    out["leaks_detailed"] = data["leaks_detailed"]
+                if data.get("quick_wins_detailed"):
+                    out["quick_wins_detailed"] = data["quick_wins_detailed"]
 
             out = _post_guardrails(out, evidence)
             return out
@@ -3523,6 +3673,230 @@ REPORT_HTML_TEMPLATE = """
       line-height:1.4;
     }
     
+    /* Deep Scan Report Sections */
+    #deepSummary{
+      display:flex;
+      flex-direction:column;
+      gap:20px;
+    }
+    .summarySection{
+      display:flex;
+      flex-direction:column;
+      gap:12px;
+    }
+    .summarySection h3{
+      font-size:15px;
+      font-weight:700;
+      color:rgba(124,247,195,.92);
+      margin:0;
+      letter-spacing:-.2px;
+    }
+    .summaryBullets{
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+      padding-left:0;
+      list-style:none;
+    }
+    .summaryBullet{
+      display:flex;
+      gap:12px;
+      align-items:flex-start;
+      font-size:14px;
+      line-height:1.5;
+      color:rgba(232,238,252,.88);
+      padding:8px 0;
+    }
+    .summaryBullet::before{
+      content:'→';
+      color:rgba(122,162,255,.82);
+      font-weight:900;
+      font-size:14px;
+      flex-shrink:0;
+      margin-top:2px;
+    }
+    .biggestLeak{
+      padding:14px 16px;
+      background:rgba(255,100,100,.12);
+      border-left:3px solid rgba(255,100,100,.65);
+      border-radius:8px;
+      font-size:14px;
+      line-height:1.5;
+      color:rgba(255,200,200,.95);
+    }
+    
+    #pagesScannedList{
+      display:grid;
+      grid-template-columns:repeat(auto-fill, minmax(280px, 1fr));
+      gap:12px;
+    }
+    .pageScannedCard{
+      padding:14px;
+      background:rgba(255,255,255,.03);
+      border:1px solid rgba(255,255,255,.10);
+      border-radius:12px;
+      transition:all 0.2s;
+    }
+    .pageScannedCard:hover{
+      background:rgba(255,255,255,.05);
+      border-color:rgba(122,162,255,.40);
+    }
+    .pageScannedTitle{
+      font-size:14px;
+      font-weight:700;
+      color:var(--text);
+      margin-bottom:8px;
+      line-height:1.3;
+    }
+    .pageScannedMeta{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      margin-bottom:10px;
+      flex-wrap:wrap;
+    }
+    .pageTypeTag{
+      font-size:11px;
+      font-weight:700;
+      padding:4px 8px;
+      border-radius:6px;
+      text-transform:uppercase;
+      letter-spacing:0.3px;
+    }
+    .pageTypeTag.home{ background:rgba(122,162,255,.25); color:rgba(200,220,255,.95); }
+    .pageTypeTag.services{ background:rgba(124,247,195,.20); color:rgba(124,247,195,.95); }
+    .pageTypeTag.treatment{ background:rgba(255,200,100,.20); color:rgba(255,220,150,.95); }
+    .pageTypeTag.contact{ background:rgba(200,100,255,.20); color:rgba(220,180,255,.95); }
+    .pageTypeTag.reviews{ background:rgba(255,180,100,.20); color:rgba(255,200,140,.95); }
+    .pageTypeTag.booking{ background:rgba(100,255,200,.20); color:rgba(140,255,220,.95); }
+    .pageTypeTag.pricing{ background:rgba(255,150,200,.20); color:rgba(255,180,220,.95); }
+    .pageTypeTag.other{ background:rgba(180,180,180,.20); color:rgba(220,220,220,.85); }
+    .pageScore{
+      font-size:13px;
+      font-weight:700;
+      color:var(--muted);
+    }
+    .pageScannedIssue{
+      font-size:12px;
+      color:rgba(255,200,200,.85);
+      margin-bottom:6px;
+      line-height:1.4;
+    }
+    .pageScannedFix{
+      font-size:12px;
+      color:rgba(124,247,195,.75);
+      line-height:1.4;
+    }
+    
+    #crossPatternsList{
+      display:flex;
+      flex-direction:column;
+      gap:14px;
+    }
+    .crossPattern{
+      padding:14px;
+      background:rgba(122,162,255,.06);
+      border-left:3px solid rgba(122,162,255,.55);
+      border-radius:8px;
+    }
+    .crossPatternText{
+      font-size:14px;
+      color:rgba(232,238,252,.90);
+      margin-bottom:8px;
+      line-height:1.5;
+    }
+    .evidencePages{
+      display:flex;
+      gap:6px;
+      flex-wrap:wrap;
+    }
+    .evidencePill{
+      font-size:11px;
+      font-weight:600;
+      padding:4px 8px;
+      border-radius:6px;
+      background:rgba(122,162,255,.18);
+      color:rgba(200,220,255,.88);
+      cursor:pointer;
+      transition:all 0.15s;
+    }
+    .evidencePill:hover{
+      background:rgba(122,162,255,.30);
+      transform:translateY(-1px);
+    }
+    
+    #pageCritiquesList{
+      display:flex;
+      flex-direction:column;
+      gap:16px;
+    }
+    .pageCritiqueCard{
+      padding:18px;
+      background:rgba(255,255,255,.02);
+      border:1px solid rgba(255,255,255,.08);
+      border-radius:14px;
+    }
+    .pageCritiqueTitle{
+      font-size:16px;
+      font-weight:700;
+      color:var(--text);
+      margin-bottom:12px;
+      letter-spacing:-.3px;
+    }
+    .pageCritiqueSection{
+      margin-bottom:14px;
+    }
+    .pageCritiqueSection:last-child{
+      margin-bottom:0;
+    }
+    .pageCritiqueLabel{
+      font-size:12px;
+      font-weight:700;
+      text-transform:uppercase;
+      letter-spacing:0.5px;
+      color:var(--muted);
+      margin-bottom:8px;
+    }
+    .pageCritiqueLabel.working{ color:rgba(124,247,195,.75); }
+    .pageCritiqueLabel.hurting{ color:rgba(255,180,180,.75); }
+    .pageCritiqueLabel.fixes{ color:rgba(122,162,255,.75); }
+    .pageCritiqueList{
+      display:flex;
+      flex-direction:column;
+      gap:6px;
+      padding-left:0;
+      list-style:none;
+    }
+    .pageCritiqueItem{
+      display:flex;
+      gap:10px;
+      align-items:flex-start;
+      font-size:13px;
+      line-height:1.5;
+      color:rgba(232,238,252,.85);
+    }
+    .pageCritiqueItem.working::before{
+      content:'✓';
+      color:rgba(124,247,195,.85);
+      font-weight:900;
+      flex-shrink:0;
+      margin-top:2px;
+    }
+    .pageCritiqueItem.hurting::before{
+      content:'⚠';
+      color:rgba(255,180,180,.85);
+      font-weight:900;
+      flex-shrink:0;
+      margin-top:2px;
+    }
+    .pageCritiqueItem.fix::before{
+      content:'→';
+      color:rgba(122,162,255,.85);
+      font-weight:900;
+      flex-shrink:0;
+      margin-top:2px;
+    }
+    
     /* Print styles for PDF */
     @media print {
       /* Force white background and black text */
@@ -3668,7 +4042,7 @@ REPORT_HTML_TEMPLATE = """
         <div class="meta">
           <a id="siteUrl" href="#" target="_blank" rel="noopener" class="pill">Website</a>
           <span class="pill" id="band">Band</span>
-          <span class="pill">Mode: __MODE__</span>
+          <span class="pill" id="scanModeLabel">Quick Scan</span>
         </div>
         <div class="status" id="status">Loading...</div>
       </div>
@@ -3762,6 +4136,26 @@ REPORT_HTML_TEMPLATE = """
       </div>
     </div>
 
+    <div class="panel" id="deepSummaryPanel" style="display:none;">
+      <h2>Executive Summary</h2>
+      <div id="deepSummary"></div>
+    </div>
+
+    <div class="panel" id="pagesScannedPanel" style="display:none;">
+      <h2>Pages Scanned</h2>
+      <div id="pagesScannedList"></div>
+    </div>
+
+    <div class="panel" id="crossPatternsPanel" style="display:none;">
+      <h2>Cross-Page Patterns</h2>
+      <div id="crossPatternsList"></div>
+    </div>
+
+    <div class="panel" id="pageCritiquesPanel" style="display:none;">
+      <h2>Page-by-Page Critique</h2>
+      <div id="pageCritiquesList"></div>
+    </div>
+
     <div class="panel">
       <h2>Scores</h2>
       <div class="scoreCards" id="scoreBars"></div>
@@ -3852,6 +4246,44 @@ async function logEvent(eventType, metadata = {}) {
 
 // Log report_viewed event on page load
 logEvent('report_viewed');
+
+// Helper function to get a friendly label from a URL path
+function getPageLabelFromUrl(url) {
+  try {
+    const urlObj = new URL(url);
+    const path = urlObj.pathname.toLowerCase();
+    
+    if (path === '/' || path === '') return 'Home';
+    if (path.includes('service')) return 'Services';
+    if (path.includes('treatment')) return 'Treatment';
+    if (path.includes('contact')) return 'Contact';
+    if (path.includes('review')) return 'Reviews';
+    if (path.includes('book') || path.includes('appointment')) return 'Booking';
+    if (path.includes('price') || path.includes('cost') || path.includes('pricing')) return 'Pricing';
+    if (path.includes('about')) return 'About';
+    if (path.includes('faq')) return 'FAQ';
+    if (path.includes('blog')) return 'Blog';
+    if (path.includes('gallery')) return 'Gallery';
+    
+    return 'Page';
+  } catch (e) {
+    // If URL parsing fails (e.g., relative URL), try path-based matching
+    const lowerUrl = url.toLowerCase();
+    if (lowerUrl === '/' || lowerUrl === '') return 'Home';
+    if (lowerUrl.includes('service')) return 'Services';
+    if (lowerUrl.includes('treatment')) return 'Treatment';
+    if (lowerUrl.includes('contact')) return 'Contact';
+    if (lowerUrl.includes('review')) return 'Reviews';
+    if (lowerUrl.includes('book') || lowerUrl.includes('appointment')) return 'Booking';
+    if (lowerUrl.includes('price') || lowerUrl.includes('cost') || lowerUrl.includes('pricing')) return 'Pricing';
+    if (lowerUrl.includes('about')) return 'About';
+    if (lowerUrl.includes('faq')) return 'FAQ';
+    if (lowerUrl.includes('blog')) return 'Blog';
+    if (lowerUrl.includes('gallery')) return 'Gallery';
+    
+    return 'Page';
+  }
+}
 
 // Send report email function
 let lastEmailSent = 0;
@@ -4139,6 +4571,15 @@ function setList(id, items) {
         const impactClass = `chipImpact${impact}`;
         const effortClass = `chipEffort${effort}`;
         
+        // Add evidence pages pills if available
+        const evidencePills = (item.evidence_pages && item.evidence_pages.length) ? 
+          `<div class="evidencePages" style="margin-top:6px;">
+            ${item.evidence_pages.slice(0, 5).map(url => {
+              const label = getPageLabelFromUrl(url);
+              return `<span class="evidencePill" data-url="${esc(url)}">${esc(label)}</span>`;
+            }).join('')}
+          </div>` : '';
+        
         return `<li>
           <div class="quickWinCheckbox" data-index="${idx}" role="checkbox" aria-checked="false" aria-label="Mark ${esc(item.action)} as complete" tabindex="0"></div>
           <div class="itemContent">
@@ -4147,6 +4588,7 @@ function setList(id, items) {
               <span class="chip ${impactClass}">Impact: ${esc(impact)}</span>
               <span class="chip ${effortClass}">Effort: ${esc(effort)}</span>
             </div>
+            ${evidencePills}
           </div>
         </li>`;
       }
@@ -4181,7 +4623,7 @@ function setList(id, items) {
   const icon = icons[id] || '•';
   
   el.innerHTML = arr.slice(0, 12).map(item => {
-    // Handle both string items (old format) and structured items (new format)
+    // Handle both string items (old format) and structured items (new format with evidence_pages)
     if (typeof item === 'string') {
       // Legacy format: plain string
       return `<li>
@@ -4192,33 +4634,34 @@ function setList(id, items) {
       </li>`;
     } else if (item && typeof item === 'object') {
       // New structured format
-      const title = item.title ? `<div class="itemTitle">${esc(item.title)}</div>` : '';
-      const why = item.why ? `<div class="itemWhy">${esc(item.why)}</div>` : '';
-      const evidence = item.evidence ? 
-        `<a href="#${esc(item.evidence)}" class="itemEvidence" data-anchor="${esc(item.evidence)}">
-          <span>📸</span>
-          <span>View evidence</span>
-        </a>` : '';
+      const text = item.strength || item.leak || item.title || item.why || '';
+      const evidencePills = (item.evidence_pages && item.evidence_pages.length) ? 
+        `<div class="evidencePages" style="margin-top:6px;">
+          ${item.evidence_pages.slice(0, 5).map(url => {
+            const label = getPageLabelFromUrl(url);
+            return `<span class="evidencePill" data-url="${esc(url)}">${esc(label)}</span>`;
+          }).join('')}
+        </div>` : '';
       
       return `<li>
         <div class="itemIcon">${icon}</div>
         <div class="itemContent">
-          ${title}
-          ${why}
-          ${evidence}
+          <div class="itemWhy">${esc(text)}</div>
+          ${evidencePills}
         </div>
       </li>`;
     }
     return '';
   }).join("");
   
-  // Add event listeners for evidence links (using event delegation after DOM update)
-  el.querySelectorAll('.itemEvidence').forEach(link => {
-    link.addEventListener('click', (e) => {
+  // Add event listeners for evidence pills
+  el.querySelectorAll('.evidencePill').forEach(pill => {
+    pill.addEventListener('click', (e) => {
       e.preventDefault();
-      const anchor = link.getAttribute('data-anchor');
-      if (anchor) {
-        scrollToScreenshot(anchor);
+      const url = pill.getAttribute('data-url');
+      if (url) {
+        console.log('Evidence page clicked:', url);
+        // Could scroll to screenshots or highlight relevant page
       }
     });
   });
@@ -4577,6 +5020,167 @@ function addPageScreenshots(manifest, screenshots, pageNum) {
   });
 }
 
+// Render deep scan summary
+function renderDeepSummary(summary) {
+  const panel = document.getElementById('deepSummaryPanel');
+  const container = document.getElementById('deepSummary');
+  
+  if (!summary) {
+    panel.style.display = 'none';
+    return;
+  }
+  
+  panel.style.display = 'block';
+  
+  let html = '';
+  
+  // Executive summary bullets
+  if (summary.executive_summary && summary.executive_summary.length) {
+    html += `<div class="summarySection">
+      <h3>Key Findings</h3>
+      <ul class="summaryBullets">
+        ${summary.executive_summary.map(bullet => 
+          `<li class="summaryBullet">${esc(bullet)}</li>`
+        ).join('')}
+      </ul>
+    </div>`;
+  }
+  
+  // Biggest booking leak
+  if (summary.biggest_booking_leak) {
+    html += `<div class="summarySection">
+      <h3>Biggest Booking Leak</h3>
+      <div class="biggestLeak">${esc(summary.biggest_booking_leak)}</div>
+    </div>`;
+  }
+  
+  // Top 3 fixes
+  if (summary.top_3_fixes && summary.top_3_fixes.length) {
+    html += `<div class="summarySection">
+      <h3>Top 3 Priority Fixes</h3>
+      <ul class="summaryBullets">
+        ${summary.top_3_fixes.map((fix, idx) => 
+          `<li class="summaryBullet"><strong>${idx + 1}.</strong> ${esc(fix)}</li>`
+        ).join('')}
+      </ul>
+    </div>`;
+  }
+  
+  container.innerHTML = html;
+}
+
+// Render pages scanned list
+function renderPagesScanned(pages) {
+  const panel = document.getElementById('pagesScannedPanel');
+  const container = document.getElementById('pagesScannedList');
+  
+  if (!pages || !pages.length) {
+    panel.style.display = 'none';
+    return;
+  }
+  
+  panel.style.display = 'block';
+  
+  const html = pages.map(page => {
+    const typeClass = (page.type || 'other').toLowerCase();
+    return `<div class="pageScannedCard">
+      <div class="pageScannedTitle">${esc(page.title || page.url)}</div>
+      <div class="pageScannedMeta">
+        <span class="pageTypeTag ${typeClass}">${esc(page.type || 'other')}</span>
+        <span class="pageScore">${page.page_score}/10</span>
+      </div>
+      ${page.top_issue ? `<div class="pageScannedIssue">⚠ ${esc(page.top_issue)}</div>` : ''}
+      ${page.top_fix ? `<div class="pageScannedFix">→ ${esc(page.top_fix)}</div>` : ''}
+    </div>`;
+  }).join('');
+  
+  container.innerHTML = html;
+}
+
+// Render cross-page patterns
+function renderCrossPatterns(patterns) {
+  const panel = document.getElementById('crossPatternsPanel');
+  const container = document.getElementById('crossPatternsList');
+  
+  if (!patterns || !patterns.length) {
+    panel.style.display = 'none';
+    return;
+  }
+  
+  panel.style.display = 'block';
+  
+  const html = patterns.map(pattern => {
+    const evidencePills = (pattern.evidence_pages && pattern.evidence_pages.length) ?
+      `<div class="evidencePages">
+        ${pattern.evidence_pages.slice(0, 5).map(url => {
+          const label = getPageLabelFromUrl(url);
+          return `<span class="evidencePill">${esc(label)}</span>`;
+        }).join('')}
+      </div>` : '';
+    
+    return `<div class="crossPattern">
+      <div class="crossPatternText">${esc(pattern.pattern)}</div>
+      ${evidencePills}
+    </div>`;
+  }).join('');
+  
+  container.innerHTML = html;
+}
+
+// Render page critiques
+function renderPageCritiques(critiques) {
+  const panel = document.getElementById('pageCritiquesPanel');
+  const container = document.getElementById('pageCritiquesList');
+  
+  if (!critiques || !critiques.length) {
+    panel.style.display = 'none';
+    return;
+  }
+  
+  panel.style.display = 'block';
+  
+  const html = critiques.map(critique => {
+    const workingHtml = (critique.whats_working && critique.whats_working.length) ?
+      `<div class="pageCritiqueSection">
+        <div class="pageCritiqueLabel working">What's Working</div>
+        <ul class="pageCritiqueList">
+          ${critique.whats_working.map(item => 
+            `<li class="pageCritiqueItem working">${esc(item)}</li>`
+          ).join('')}
+        </ul>
+      </div>` : '';
+    
+    const hurtingHtml = (critique.whats_hurting && critique.whats_hurting.length) ?
+      `<div class="pageCritiqueSection">
+        <div class="pageCritiqueLabel hurting">What's Hurting</div>
+        <ul class="pageCritiqueList">
+          ${critique.whats_hurting.map(item => 
+            `<li class="pageCritiqueItem hurting">${esc(item)}</li>`
+          ).join('')}
+        </ul>
+      </div>` : '';
+    
+    const fixesHtml = (critique.fixes && critique.fixes.length) ?
+      `<div class="pageCritiqueSection">
+        <div class="pageCritiqueLabel fixes">Recommended Fixes</div>
+        <ul class="pageCritiqueList">
+          ${critique.fixes.map(item => 
+            `<li class="pageCritiqueItem fix">${esc(item)}</li>`
+          ).join('')}
+        </ul>
+      </div>` : '';
+    
+    return `<div class="pageCritiqueCard">
+      <div class="pageCritiqueTitle">${esc(critique.page_title || critique.page_url)}</div>
+      ${workingHtml}
+      ${hurtingHtml}
+      ${fixesHtml}
+    </div>`;
+  }).join('');
+  
+  container.innerHTML = html;
+}
+
 async function tick() {
   const res = await fetch('/api/scan/' + scanId);
   const data = await res.json();
@@ -4600,6 +5204,19 @@ async function tick() {
   if (pagesScannedLabel && pagesScanned > 1) {
     pagesScannedLabel.textContent = `(${pagesScanned} pages scanned)`;
     pagesScannedLabel.style.display = 'inline';
+  }
+  
+  // Update scan mode label
+  const scanModeLabel = document.getElementById('scanModeLabel');
+  if (scanModeLabel) {
+    if (scanMode === 'deep' || pagesScanned > 1) {
+      scanModeLabel.textContent = `Deep Scan (${pagesScanned} pages)`;
+      scanModeLabel.style.background = 'linear-gradient(135deg, rgba(124,247,195,.25), rgba(122,162,255,.20))';
+      scanModeLabel.style.borderColor = 'rgba(124,247,195,.40)';
+      scanModeLabel.style.color = 'rgba(124,247,195,.95)';
+    } else {
+      scanModeLabel.textContent = 'Quick Scan';
+    }
   }
   
   // Show/hide UI components based on isDeliverable
@@ -4681,9 +5298,39 @@ async function tick() {
 
     renderBars(score.scores || {});
     renderMiniBars(score.scores || {});
-    setList("strengths", score.strengths || []);
-    setList("leaks", score.leaks || []);
-    setList("quickWins", score.quick_wins || []);
+    
+    // Use detailed versions if available (deep scan), otherwise use legacy format
+    if (score.strengths_detailed && score.strengths_detailed.length) {
+      setList("strengths", score.strengths_detailed);
+    } else {
+      setList("strengths", score.strengths || []);
+    }
+    
+    if (score.leaks_detailed && score.leaks_detailed.length) {
+      setList("leaks", score.leaks_detailed);
+    } else {
+      setList("leaks", score.leaks || []);
+    }
+    
+    if (score.quick_wins_detailed && score.quick_wins_detailed.length) {
+      setList("quickWins", score.quick_wins_detailed);
+    } else {
+      setList("quickWins", score.quick_wins || []);
+    }
+    
+    // Render deep scan sections if available
+    if (score.summary) {
+      renderDeepSummary(score.summary);
+    }
+    if (score.pages_scanned) {
+      renderPagesScanned(score.pages_scanned);
+    }
+    if (score.cross_page_patterns) {
+      renderCrossPatterns(score.cross_page_patterns);
+    }
+    if (score.page_critiques) {
+      renderPageCritiques(score.page_critiques);
+    }
   }
 
   if (debug) {
