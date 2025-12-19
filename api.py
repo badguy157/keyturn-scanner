@@ -2156,7 +2156,11 @@ def ai_score_patient_flow(target_url: str, evidence: Dict[str, Any], scan_id: Op
         raise RuntimeError(msg)
 
     # Initialize OpenAI client with max_retries=0 and custom timeout
-    # Timeout values: connect=90s, read=180s, write=60s, pool=90s
+    # Timeout values explained:
+    #   connect=90s: Time to establish connection (handles slow networks)
+    #   read=180s: Time to read response (handles large model outputs)
+    #   write=60s: Time to write request (handles screenshot upload)
+    #   pool=90s: Time to acquire connection from pool
     timeout = httpx.Timeout(connect=90.0, read=180.0, write=60.0, pool=90.0)
     client = OpenAI(timeout=timeout, max_retries=0)  # type: ignore
     
@@ -2372,11 +2376,14 @@ Return output that fits the required JSON schema.
     
     # For deep scans, add screenshots from additional pages (limit to max_screenshot_pages total)
     if is_deep_scan and additional_pages and screenshot_count < max_screenshot_pages:
-        pages_with_screenshots = min(len(additional_pages), max_screenshot_pages - screenshot_count)
-        for p in additional_pages[:pages_with_screenshots]:
+        # Calculate how many pages we can still add screenshots from
+        remaining_slots = max_screenshot_pages - screenshot_count
+        pages_to_process = additional_pages[:remaining_slots]
+        
+        for p in pages_to_process:
             # Add one desktop screenshot per additional page
             desktop_screenshots = p.get("desktop", {}).get("screenshot_urls", [])
-            if desktop_screenshots and screenshot_count < max_screenshot_pages:
+            if desktop_screenshots:
                 img = _img_to_data_url(desktop_screenshots[0])
                 if img:
                     content.append({"type": "input_image", "image_url": img})
