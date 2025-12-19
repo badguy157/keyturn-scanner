@@ -3568,8 +3568,9 @@ def create_scan(req: ScanRequest):
 def get_scan(scan_id: str):
     conn = db()
     row = conn.execute("SELECT * FROM scans WHERE id=?", (scan_id,)).fetchone()
-    conn.close()
+    
     if not row:
+        conn.close()
         raise HTTPException(status_code=404, detail="Scan not found")
 
     # Determine entitlements based on scan mode
@@ -3577,6 +3578,49 @@ def get_scan(scan_id: str):
     entitlements = {
         "deep": mode == SCAN_MODE_DEEP
     }
+
+    # Fetch deep scan data if available
+    deep_scan_data = None
+    if mode == SCAN_MODE_DEEP:
+        # Fetch page analyses
+        page_rows = conn.execute(
+            "SELECT * FROM scan_pages WHERE scan_id=? ORDER BY id",
+            (scan_id,)
+        ).fetchall()
+        
+        # Fetch synthesis summary
+        summary_row = conn.execute(
+            "SELECT * FROM scan_summaries WHERE scan_id=?",
+            (scan_id,)
+        ).fetchone()
+        
+        if page_rows or summary_row:
+            deep_scan_data = {}
+            
+            if page_rows:
+                deep_scan_data["pages"] = [
+                    {
+                        "id": r["id"],
+                        "url": r["url"],
+                        "title": r["title"],
+                        "page_type": r["page_type"],
+                        "screenshot_paths": json.loads(r["screenshot_paths"]) if r["screenshot_paths"] else None,
+                        "extracted_signals": json.loads(r["extracted_signals"]) if r["extracted_signals"] else None,
+                        "analysis": json.loads(r["analysis"]) if r["analysis"] else None,
+                    }
+                    for r in page_rows
+                ]
+            
+            if summary_row:
+                deep_scan_data["synthesis"] = {
+                    "executive_summary": json.loads(summary_row["executive_summary"]) if summary_row["executive_summary"] else None,
+                    "journey_map": json.loads(summary_row["journey_map"]) if summary_row["journey_map"] else None,
+                    "action_plan": json.loads(summary_row["action_plan"]) if summary_row["action_plan"] else None,
+                    "roadmap_90d": json.loads(summary_row["roadmap_90d"]) if summary_row["roadmap_90d"] else None,
+                    "coverage": json.loads(summary_row["coverage"]) if summary_row["coverage"] else None,
+                }
+    
+    conn.close()
 
     resp = {
         "id": row["id"],
@@ -3589,6 +3633,7 @@ def get_scan(scan_id: str):
         "score": json.loads(row["score_json"]) if row["score_json"] else None,
         "evidence": json.loads(row["evidence_json"]) if row["evidence_json"] else None,
         "entitlements": entitlements,
+        "deep_scan": deep_scan_data,
     }
     return JSONResponse(resp)
 
