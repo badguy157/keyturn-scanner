@@ -236,7 +236,7 @@ def db() -> sqlite3.Connection:
     return conn
 
 
-def db_safe(v: Any) -> Any:
+def db_safe(value: Any) -> Any:
     """
     Make a value safe for SQLite binding.
     
@@ -246,16 +246,16 @@ def db_safe(v: Any) -> Any:
     
     This prevents sqlite3.InterfaceError: Error binding parameter ... unsupported type
     """
-    if v is None or isinstance(v, (str, int, float, bool)):
-        return v
-    if isinstance(v, Exception):
-        return str(v)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Exception):
+        return str(value)
     # For dict, list, or any other complex object, serialize to JSON
     try:
-        return json.dumps(v, default=str)
-    except Exception:
+        return json.dumps(value, default=str)
+    except (TypeError, ValueError) as e:
         # Fallback: convert to string if JSON serialization fails
-        return str(v)
+        return str(value)
 
 
 def _ensure_columns() -> None:
