@@ -125,6 +125,7 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 # Deep scan configuration
 DEEP_SCAN_TEXT_SAMPLE_LIMIT = 500  # Character limit for text samples in deep scan evidence
+MAX_RETRIES_PER_PAGE = 2  # Maximum number of retry attempts per page in deep scan
 
 # Scoring lifecycle configuration
 SCORING_WATCHDOG_TIMEOUT_SECONDS = 300  # 5 minutes - mark scoring as timed out if no update
@@ -3237,6 +3238,20 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
         if mode == "deep" and len(captured_pages) > 1:
             print(f"[SCAN] Deep mode: analyzing {len(captured_pages)} pages individually")
             
+            # Helper function to create error analysis
+            def create_error_analysis(url: str, page_type: str, error_msg: str) -> Dict[str, Any]:
+                """Create a standardized error analysis dict."""
+                return {
+                    "url": url,
+                    "page_type": page_type,
+                    "summary": f"Analysis error: {error_msg}",
+                    "strengths": [],
+                    "leaks": [],
+                    "quick_wins": [],
+                    "notes": {},
+                    "error": error_msg,
+                }
+            
             # Track page count for garbage collection
             pages_processed = 0
             
@@ -3255,17 +3270,9 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                 if desktop_data.get("error") and mobile_data.get("error"):
                     print(f"[SCAN] Skipping analysis for {page_url} (capture failed)")
                     failed_page_analyses += 1
-                    page_errors.append(f"{page_url}: {desktop_data.get('error')}")
-                    error_analysis = {
-                        "url": page_url,
-                        "page_type": "unknown",
-                        "summary": "Page capture failed",
-                        "strengths": [],
-                        "leaks": [],
-                        "quick_wins": [],
-                        "notes": {},
-                        "error": desktop_data.get("error"),
-                    }
+                    error_msg = desktop_data.get("error", "Unknown capture error")
+                    page_errors.append(f"{page_url}: {error_msg}")
+                    error_analysis = create_error_analysis(page_url, "unknown", f"Page capture failed: {error_msg}")
                     # Store minimal error analysis in database
                     conn.execute(
                         """
@@ -3289,125 +3296,145 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                     del error_analysis
                     continue
                 
-                try:
-                    # Get HTML content (prefer desktop, fall back to mobile)
-                    html_content = desktop_data.get("html_content", "") or mobile_data.get("html_content", "")
+                # Get HTML content (prefer desktop, fall back to mobile)
+                html_content = desktop_data.get("html_content", "") or mobile_data.get("html_content", "")
+                
+                # If no HTML, use text sample
+                if not html_content:
+                    text_sample = desktop_data.get("text_sample", "") or mobile_data.get("text_sample", "")
+                    html_content = f"<html><body>{text_sample}</body></html>"
+                
+                # Classify page type from evidence
+                title = desktop_data.get("title", "") or mobile_data.get("title", "")
+                h1 = desktop_data.get("h1", "") or mobile_data.get("h1", "")
+                page_type = _classify_page_type(page_url, "", h1)
+                
+                # Extract signals
+                signals = extract_page_signals(page_url, html_content, page_type)
+                
+                # Get screenshot paths (filenames only, not data)
+                screenshot_desktop = None
+                screenshot_mobile = None
+                if desktop_data.get("screenshot_urls"):
+                    screenshot_desktop = desktop_data["screenshot_urls"][0]
+                if mobile_data.get("screenshot_urls"):
+                    screenshot_mobile = mobile_data["screenshot_urls"][0]
+                
+                # Retry loop for page analysis (max MAX_RETRIES_PER_PAGE attempts)
+                analysis = None
+                last_error = None
+                for retry_attempt in range(MAX_RETRIES_PER_PAGE):
+                    try:
+                        # Analyze this page
+                        attempt_msg = f" (attempt {retry_attempt + 1}/{MAX_RETRIES_PER_PAGE})" if retry_attempt > 0 else ""
+                        print(f"[SCAN] Analyzing page {i+1}/{len(captured_pages)}: {page_url} ({page_type}){attempt_msg}")
+                        # Touch before analysis to prevent timeout
+                        touch_scan(scan_id)
+                        analysis = analyze_single_page(
+                            page_url=page_url,
+                            page_type=page_type,
+                            html_content=html_content,
+                            screenshot_desktop=screenshot_desktop,
+                            screenshot_mobile=screenshot_mobile,
+                            signals=signals,
+                        )
+                        # Touch after analysis completes
+                        touch_scan(scan_id)
+                        
+                        # Safety check: ensure analysis is not None before accessing
+                        if analysis is None:
+                            raise RuntimeError("analyze_single_page returned None")
+                        
+                        analysis["url"] = page_url  # Ensure URL is set
+                        
+                        # Check if analysis succeeded (no error field means success)
+                        if not analysis.get("error"):
+                            # Success - break out of retry loop
+                            break
+                        else:
+                            # Analysis returned with error - retry if we have attempts left
+                            last_error = analysis.get("error")
+                            print(f"[SCAN] Page analysis returned error for {page_url}: {last_error}")
+                            if retry_attempt < MAX_RETRIES_PER_PAGE - 1:
+                                print(f"[SCAN] Retrying page analysis for {page_url}")
+                            else:
+                                print(f"[SCAN] Max retries reached for {page_url}, storing error result")
                     
-                    # If no HTML, use text sample
-                    if not html_content:
-                        text_sample = desktop_data.get("text_sample", "") or mobile_data.get("text_sample", "")
-                        html_content = f"<html><body>{text_sample}</body></html>"
-                    
-                    # Classify page type from evidence
-                    title = desktop_data.get("title", "") or mobile_data.get("title", "")
-                    h1 = desktop_data.get("h1", "") or mobile_data.get("h1", "")
-                    page_type = _classify_page_type(page_url, "", h1)
-                    
-                    # Extract signals
-                    signals = extract_page_signals(page_url, html_content, page_type)
-                    
-                    # Get screenshot paths (filenames only, not data)
-                    screenshot_desktop = None
-                    screenshot_mobile = None
-                    if desktop_data.get("screenshot_urls"):
-                        screenshot_desktop = desktop_data["screenshot_urls"][0]
-                    if mobile_data.get("screenshot_urls"):
-                        screenshot_mobile = mobile_data["screenshot_urls"][0]
-                    
-                    # Analyze this page
-                    print(f"[SCAN] Analyzing page {i+1}/{len(captured_pages)}: {page_url} ({page_type})")
-                    # Touch before analysis to prevent timeout
-                    touch_scan(scan_id)
-                    analysis = analyze_single_page(
-                        page_url=page_url,
-                        page_type=page_type,
-                        html_content=html_content,
-                        screenshot_desktop=screenshot_desktop,
-                        screenshot_mobile=screenshot_mobile,
-                        signals=signals,
+                    except Exception as page_err:
+                        last_error = str(page_err)
+                        print(f"[SCAN] Error analyzing {page_url} on attempt {retry_attempt + 1}: {page_err}")
+                        if retry_attempt < MAX_RETRIES_PER_PAGE - 1:
+                            print(f"[SCAN] Retrying page analysis for {page_url}")
+                        else:
+                            print(f"[SCAN] Max retries reached for {page_url}, storing error result")
+                            # Create error analysis on final failure using helper
+                            analysis = create_error_analysis(
+                                page_url, 
+                                page_type, 
+                                f"After {MAX_RETRIES_PER_PAGE} attempts: {str(page_err)}"
+                            )
+                
+                # Track success/failure based on actual analysis result
+                # Defensive: create fallback if analysis is somehow None (should not happen)
+                if analysis is None:
+                    print(f"[SCAN] WARNING: Unexpected None analysis for {page_url}, creating fallback error")
+                    analysis = create_error_analysis(
+                        page_url,
+                        page_type,
+                        "Unexpected error - analysis not completed after retry loop"
                     )
-                    # Touch after analysis completes
-                    touch_scan(scan_id)
-                    analysis["url"] = page_url  # Ensure URL is set
-                    
-                    # Check if analysis contains an error
-                    if analysis.get("error"):
-                        failed_page_analyses += 1
-                        page_errors.append(f"{page_url}: {analysis.get('error')}")
-                        print(f"[SCAN] Page analysis returned error for {page_url}: {analysis.get('error')}")
-                    else:
-                        successful_page_analyses += 1
-                    
-                    # Store page analysis in database immediately
-                    conn.execute(
-                        """
-                        INSERT INTO scan_pages 
-                        (scan_id, url, title, page_type, is_mobile, screenshot_paths, extracted_signals, analysis, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            scan_id,
-                            page_url,
-                            title[:200] if title else None,
-                            page_type,
-                            0,  # is_mobile = False for desktop analysis
-                            db_safe({
-                                "desktop": desktop_data.get("screenshot_urls", []),
-                                "mobile": mobile_data.get("screenshot_urls", []),
-                            }),
-                            db_safe(signals),
-                            db_safe(analysis),
-                            now_iso(),
-                        ),
-                    )
-                    conn.commit()
-                    
-                    # Free memory immediately after storing
-                    del analysis
-                    del html_content
-                    del signals
-                    pages_processed += 1
-                    
-                    # Call garbage collector every 2 pages to free memory aggressively
-                    # This is needed for 512MB memory-constrained environments
-                    if pages_processed % 2 == 0:
-                        gc.collect()
-                    
-                except Exception as page_err:
-                    print(f"[SCAN] Error analyzing {page_url}: {page_err}")
+                
+                if not analysis.get("error"):
+                    successful_page_analyses += 1
+                else:
                     failed_page_analyses += 1
-                    page_errors.append(f"{page_url}: {str(page_err)}")
-                    error_analysis = {
-                        "url": page_url,
-                        "page_type": "unknown",
-                        "summary": f"Analysis error: {str(page_err)}",
-                        "strengths": [],
-                        "leaks": [],
-                        "quick_wins": [],
-                        "notes": {},
-                        "error": str(page_err),
-                    }
-                    # Store error analysis
-                    conn.execute(
-                        """
-                        INSERT INTO scan_pages 
-                        (scan_id, url, title, page_type, is_mobile, screenshot_paths, extracted_signals, analysis, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            scan_id,
-                            page_url,
-                            None,
-                            "unknown",
-                            0,
-                            db_safe({}),
-                            db_safe({}),
-                            db_safe(error_analysis),
-                            now_iso(),
-                        ),
-                    )
-                    conn.commit()
-                    del error_analysis
+                    # Handles None, empty string, and other falsy values
+                    error_message = last_error if last_error else "Unknown error"
+                    page_errors.append(f"{page_url}: {error_message}")
+                
+                # Store page analysis in database (either success or final error)
+                conn.execute(
+                    """
+                    INSERT INTO scan_pages 
+                    (scan_id, url, title, page_type, is_mobile, screenshot_paths, extracted_signals, analysis, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        scan_id,
+                        page_url,
+                        title[:200] if title else None,
+                        page_type,
+                        0,  # is_mobile = False for desktop analysis
+                        db_safe({
+                            "desktop": desktop_data.get("screenshot_urls", []),
+                            "mobile": mobile_data.get("screenshot_urls", []),
+                        }),
+                        db_safe(signals),
+                        db_safe(analysis),
+                        now_iso(),
+                    ),
+                )
+                conn.commit()
+                
+                # Free memory immediately after storing
+                del analysis
+                del html_content
+                del signals
+                pages_processed += 1
+                
+                # Call garbage collector every 2 pages to free memory aggressively
+                # This is needed for 512MB memory-constrained environments
+                if pages_processed % 2 == 0:
+                    gc.collect()
+            
+            # Print summary of page analysis results
+            total_pages = len(captured_pages)
+            if successful_page_analyses == total_pages:
+                print(f"[SCAN] ✓ All {total_pages} pages succeeded")
+            else:
+                print(f"[SCAN] Page analysis complete: {successful_page_analyses}/{total_pages} succeeded, {failed_page_analyses}/{total_pages} failed")
+                if page_errors:
+                    print(f"[SCAN] Failed pages: {', '.join(page_errors[:5])}")  # Show first 5 errors
             
             # Retrieve minimal page analysis summaries from database for synthesis
             print(f"[SCAN] Retrieving page analyses from database for synthesis")

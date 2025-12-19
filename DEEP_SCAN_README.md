@@ -272,7 +272,17 @@ Scripts, styles, SVGs, iframes, and comments are removed.
 ## Error Handling
 
 - If a page fails to capture, it's recorded with an error and skipped in analysis
-- If AI analysis fails for a page, error is stored and synthesis continues
+- **Page Analysis Retry Logic**: Each page gets up to `MAX_RETRIES_PER_PAGE` (default: 2) attempts for AI analysis
+  - If `analyze_single_page()` fails or returns an error, the page is retried
+  - On success (no error field), the retry loop exits immediately
+  - After all retries exhausted, an error row is stored for that page
+  - The scan continues to the next page (no infinite loops on a single page)
+- **Success Tracking**: Based on actual analysis results, not just "loop completed"
+  - Success: `analysis` exists and has no `error` field
+  - Failure: `analysis` has an `error` field or exception occurred on all attempts
+- **Summary Logging**: After all pages processed:
+  - "✓ All X pages succeeded" only printed if `successful_page_analyses == total_pages`
+  - Otherwise shows detailed summary: "X/Y succeeded, Z/Y failed" with error messages
 - If synthesis fails, partial results are stored with error flag
 - Scan still completes and shows what data is available
 
