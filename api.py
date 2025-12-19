@@ -2720,7 +2720,10 @@ Be specific and actionable. Use evidence from the HTML and screenshots.
                     ],
                     text_format=PageAnalysis,
                 )
-                data = _model_to_dict(response.parsed)
+                parsed = getattr(response, "output_parsed", None) or getattr(response, "parsed", None)
+                if parsed is None:
+                    raise RuntimeError("AI returned no parsed output.")
+                data = _model_to_dict(parsed)
                 return data
         except Exception as e:
             print(f"[ANALYZE_PAGE] Structured output error: {e}")
@@ -2870,7 +2873,10 @@ IMPORTANT: You MUST provide ALL sections with the minimum requirements specified
                     ],
                     text_format=DeepScanSynthesis,
                 )
-                data = _model_to_dict(response.parsed)
+                parsed = getattr(response, "output_parsed", None) or getattr(response, "parsed", None)
+                if parsed is None:
+                    raise RuntimeError("AI returned no parsed output.")
+                data = _model_to_dict(parsed)
                 return data
         except Exception as e:
             print(f"[SYNTHESIZE] Structured output error: {e}")
