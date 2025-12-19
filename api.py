@@ -2053,6 +2053,10 @@ def ai_score_patient_flow(target_url: str, evidence: Dict[str, Any]) -> Dict[str
         raise RuntimeError(msg)
 
     # Initialize OpenAI client with timeout (90s connect, 180s read, 90s write)
+    # These values are chosen to:
+    # - connect=90s: Allow time for connection in slow networks
+    # - read=180s: Long enough for large model responses, but prevent indefinite hangs
+    # - write=90s: Sufficient for uploading screenshots and evidence
     import httpx
     timeout = httpx.Timeout(90.0, read=180.0, write=90.0, connect=90.0)
     client = OpenAI(timeout=timeout)  # type: ignore
@@ -3017,14 +3021,20 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
         )
         conn.commit()
     finally:
-        # Always update updated_at in finally block to ensure watchdog can detect stale scans
+        # Always update updated_at to prevent watchdog false positives
+        # Use separate try/except to handle connection errors gracefully
         try:
             conn.execute("UPDATE scans SET updated_at=? WHERE id=?", (now_iso(), scan_id))
             conn.commit()
-        except Exception:
-            pass  # Connection might be closed
-        finally:
+        except (sqlite3.Error, sqlite3.ProgrammingError) as db_err:
+            # Connection might be closed or in error state - safe to ignore
+            print(f"[SCAN] Warning: Could not update final timestamp for {scan_id}: {db_err}")
+        
+        # Always close connection
+        try:
             conn.close()
+        except Exception:
+            pass  # Connection already closed
 
 
 HOME_HTML_TEMPLATE = """
