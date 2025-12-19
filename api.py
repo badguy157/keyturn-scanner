@@ -3080,6 +3080,124 @@ HOME_HTML_TEMPLATE = """
     .fine{margin-top:12px; font-size:12px; color:rgba(232,238,252,.58)}
     .foot{margin-top:18px; font-size:12px; color:rgba(232,238,252,.55)}
     code{background:rgba(255,255,255,.08); padding:2px 6px; border-radius:8px}
+    
+    /* Deep scan styles */
+    .fixFirstBox{
+      margin-top:20px; padding:16px; border-radius:12px;
+      background:linear-gradient(135deg, rgba(124,247,195,.15), rgba(122,162,255,.10));
+      border:1px solid rgba(124,247,195,.30);
+    }
+    .fixFirstLabel{
+      font-size:12px; font-weight:600; color:rgba(124,247,195,.85);
+      margin-bottom:8px; text-transform:uppercase; letter-spacing:0.5px;
+    }
+    .fixFirstText{color:rgba(232,238,252,.95); line-height:1.6}
+    
+    .pageAnalysisCard{
+      margin-bottom:16px; border-radius:12px;
+      border:1px solid rgba(255,255,255,.10);
+      background:rgba(255,255,255,.04);
+      overflow:hidden;
+    }
+    .pageAnalysisHeader{
+      padding:16px; cursor:pointer; display:flex; justify-content:space-between;
+      align-items:center; transition:background .2s;
+    }
+    .pageAnalysisHeader:hover{background:rgba(255,255,255,.06)}
+    .pageAnalysisTitle{display:flex; align-items:center; gap:12px; flex:1}
+    .pageAnalysisUrl{color:rgba(232,238,252,.75); font-size:14px}
+    .pageAnalysisToggle{font-size:18px; color:rgba(232,238,252,.50)}
+    .pageAnalysisBody{padding:0 16px 16px; display:none}
+    .pageAnalysisBody[style*="block"]{display:block}
+    .pageAnalysisSection{margin-top:16px}
+    .pageAnalysisSectionTitle{
+      font-weight:600; margin-bottom:8px; color:rgba(232,238,252,.85);
+      font-size:14px;
+    }
+    .pageAnalysisList{
+      list-style:none; padding:0; margin:0;
+    }
+    .pageAnalysisList li{
+      padding:8px 0; border-bottom:1px solid rgba(255,255,255,.05);
+    }
+    .pageAnalysisList li:last-child{border-bottom:none}
+    
+    .journeySteps{display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start}
+    .journeyStep{
+      flex:1; min-width:200px; padding:16px; border-radius:12px;
+      background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.10);
+    }
+    .journeyStepHeader{
+      display:flex; justify-content:space-between; align-items:center;
+      margin-bottom:12px;
+    }
+    .journeyStepName{font-weight:600; font-size:16px; color:var(--accent)}
+    .journeyRisk{
+      padding:4px 8px; border-radius:6px; font-size:11px;
+      font-weight:600; text-transform:uppercase;
+    }
+    .journeyRisk.riskhigh{background:rgba(255,100,100,.20); color:rgba(255,150,150,.95)}
+    .journeyRisk.riskmed{background:rgba(255,200,100,.20); color:rgba(255,220,150,.95)}
+    .journeyRisk.risklow{background:rgba(124,247,195,.20); color:rgba(124,247,195,.95)}
+    .journeyFriction, .journeyFixes{margin-top:12px; font-size:14px}
+    .journeyFriction strong, .journeyFixes strong{
+      color:rgba(232,238,252,.75); display:block; margin-bottom:6px;
+    }
+    .journeyFriction ul, .journeyFixes ul{
+      margin:0; padding-left:20px; color:rgba(232,238,252,.70);
+    }
+    .journeyArrow{
+      align-self:center; font-size:24px; color:rgba(232,238,252,.30);
+    }
+    
+    .actionItems{display:flex; flex-direction:column; gap:12px}
+    .actionItem{
+      display:flex; gap:16px; padding:16px; border-radius:12px;
+      background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.10);
+    }
+    .actionRank{
+      flex:0 0 40px; height:40px; border-radius:8px;
+      background:linear-gradient(135deg, var(--accent), var(--accent2));
+      display:flex; align-items:center; justify-content:center;
+      font-weight:700; font-size:18px; color:rgba(0,0,20,.95);
+    }
+    .actionContent{flex:1}
+    .actionTitle{font-weight:600; margin-bottom:6px; color:rgba(232,238,252,.95)}
+    .actionDescription{font-size:14px; color:rgba(232,238,252,.70); margin-bottom:8px}
+    .actionMeta{display:flex; gap:8px}
+    
+    .roadmapPhases{display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:16px}
+    .roadmapPhase{
+      padding:20px; border-radius:12px;
+      background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.10);
+    }
+    .roadmapPhaseHeader{margin-bottom:16px}
+    .roadmapPhaseName{
+      font-weight:700; font-size:18px; color:var(--accent);
+      margin-bottom:6px;
+    }
+    .roadmapPhaseFocus{font-size:14px; color:rgba(232,238,252,.70)}
+    .roadmapTasks{
+      list-style:none; padding:0; margin:0;
+    }
+    .roadmapTasks li{
+      padding:8px 0 8px 20px; position:relative;
+      border-bottom:1px solid rgba(255,255,255,.05); color:rgba(232,238,252,.85);
+    }
+    .roadmapTasks li:before{
+      content:'✓'; position:absolute; left:0; color:rgba(124,247,195,.70);
+    }
+    .roadmapTasks li:last-child{border-bottom:none}
+    
+    .pageTypeTag{
+      padding:4px 10px; border-radius:6px; font-size:11px;
+      font-weight:600; text-transform:uppercase; letter-spacing:0.5px;
+      background:rgba(122,162,255,.20); color:rgba(122,162,255,.95);
+    }
+    .pageTypeTag.home{background:rgba(255,200,100,.20); color:rgba(255,220,150,.95)}
+    .pageTypeTag.booking_consult{background:rgba(124,247,195,.20); color:rgba(124,247,195,.95)}
+    .pageTypeTag.service_detail{background:rgba(122,162,255,.20); color:rgba(122,162,255,.95)}
+    .pageTypeTag.services_index{background:rgba(122,162,255,.20); color:rgba(122,162,255,.95)}
   </style>
 </head>
 <body>
@@ -5162,6 +5280,31 @@ REPORT_HTML_TEMPLATE = """
       <div id="deepSummary"></div>
     </div>
 
+    <div class="panel" id="executiveSummaryPanel" style="display:none;">
+      <h2>🎯 Executive Summary</h2>
+      <div id="executiveSummaryContent"></div>
+    </div>
+
+    <div class="panel" id="pageAnalysesPanel" style="display:none;">
+      <h2>📄 Page-by-Page Analysis</h2>
+      <div id="pageAnalysesList"></div>
+    </div>
+
+    <div class="panel" id="journeyMapPanel" style="display:none;">
+      <h2>🗺️ Patient Journey Map</h2>
+      <div id="journeyMapContent"></div>
+    </div>
+
+    <div class="panel" id="actionPlanPanel" style="display:none;">
+      <h2>✅ Top Action Plan</h2>
+      <div id="actionPlanContent"></div>
+    </div>
+
+    <div class="panel" id="roadmapPanel" style="display:none;">
+      <h2>📅 90-Day Roadmap</h2>
+      <div id="roadmapContent"></div>
+    </div>
+
     <div class="panel" id="pagesScannedPanel" style="display:none;">
       <h2>Pages Scanned</h2>
       <div id="pagesScannedList"></div>
@@ -6355,6 +6498,35 @@ async function tick() {
       renderPageCritiques(score.page_critiques);
     }
   }
+  
+  // Render deep scan data if available
+  const deepScan = data.deep_scan || null;
+  if (deepScan) {
+    // Render executive summary from synthesis
+    if (deepScan.synthesis && deepScan.synthesis.executive_summary) {
+      renderExecutiveSummary(deepScan.synthesis.executive_summary, deepScan.synthesis.what_to_fix_first);
+    }
+    
+    // Render page analyses
+    if (deepScan.pages && deepScan.pages.length > 0) {
+      renderPageAnalyses(deepScan.pages);
+    }
+    
+    // Render journey map
+    if (deepScan.synthesis && deepScan.synthesis.journey_map) {
+      renderJourneyMap(deepScan.synthesis.journey_map);
+    }
+    
+    // Render action plan
+    if (deepScan.synthesis && deepScan.synthesis.action_plan) {
+      renderActionPlan(deepScan.synthesis.action_plan);
+    }
+    
+    // Render 90-day roadmap
+    if (deepScan.synthesis && deepScan.synthesis.roadmap_90d) {
+      renderRoadmap(deepScan.synthesis.roadmap_90d);
+    }
+  }
 
   if (debug) {
     document.getElementById('out').textContent = JSON.stringify(score || data, null, 2);
@@ -6364,6 +6536,245 @@ async function tick() {
     setTimeout(tick, 1200);
   }
 }
+
+// Deep scan rendering functions
+function renderExecutiveSummary(summary, whatToFixFirst) {
+  const panel = document.getElementById('executiveSummaryPanel');
+  const container = document.getElementById('executiveSummaryContent');
+  
+  if (!summary || summary.length === 0) {
+    if (panel) panel.style.display = 'none';
+    return;
+  }
+  
+  if (panel) panel.style.display = 'block';
+  if (!container) return;
+  
+  let html = '<ul class="summaryBullets">';
+  summary.forEach(bullet => {
+    html += `<li class="summaryBullet">${esc(bullet)}</li>`;
+  });
+  html += '</ul>';
+  
+  if (whatToFixFirst) {
+    html += `<div class="fixFirstBox">
+      <div class="fixFirstLabel">What to Fix First:</div>
+      <div class="fixFirstText">${esc(whatToFixFirst)}</div>
+    </div>`;
+  }
+  
+  container.innerHTML = html;
+}
+
+function renderPageAnalyses(pages) {
+  const panel = document.getElementById('pageAnalysesPanel');
+  const container = document.getElementById('pageAnalysesList');
+  
+  if (!pages || pages.length === 0) {
+    if (panel) panel.style.display = 'none';
+    return;
+  }
+  
+  if (panel) panel.style.display = 'block';
+  if (!container) return;
+  
+  let html = '';
+  pages.forEach((page, idx) => {
+    const analysis = page.analysis || {};
+    const pageType = analysis.page_type || page.page_type || 'unknown';
+    const summary = analysis.summary || 'No analysis available';
+    const strengths = analysis.strengths || [];
+    const leaks = analysis.leaks || [];
+    const quickWins = analysis.quick_wins || [];
+    
+    html += `<div class="pageAnalysisCard">
+      <div class="pageAnalysisHeader" onclick="togglePageAnalysis(${idx})">
+        <div class="pageAnalysisTitle">
+          <span class="pageTypeTag ${pageType}">${esc(pageType.replace('_', ' '))}</span>
+          <span class="pageAnalysisUrl">${esc(page.title || page.url)}</span>
+        </div>
+        <div class="pageAnalysisToggle" id="pageToggle${idx}">▼</div>
+      </div>
+      <div class="pageAnalysisBody" id="pageBody${idx}" style="display: none;">
+        <div class="pageAnalysisSection">
+          <div class="pageAnalysisSectionTitle">Summary</div>
+          <p>${esc(summary)}</p>
+        </div>`;
+    
+    if (strengths.length > 0) {
+      html += `<div class="pageAnalysisSection">
+        <div class="pageAnalysisSectionTitle">✓ Strengths</div>
+        <ul class="pageAnalysisList">`;
+      strengths.forEach(s => {
+        html += `<li>${esc(s)}</li>`;
+      });
+      html += `</ul></div>`;
+    }
+    
+    if (leaks.length > 0) {
+      html += `<div class="pageAnalysisSection">
+        <div class="pageAnalysisSectionTitle">⚠ Booking Leaks</div>
+        <ul class="pageAnalysisList">`;
+      leaks.forEach(l => {
+        html += `<li>${esc(l)}</li>`;
+      });
+      html += `</ul></div>`;
+    }
+    
+    if (quickWins.length > 0) {
+      html += `<div class="pageAnalysisSection">
+        <div class="pageAnalysisSectionTitle">⚡ Quick Wins</div>
+        <ul class="pageAnalysisList">`;
+      quickWins.forEach(qw => {
+        const title = qw.title || qw.action || '';
+        const impact = qw.impact || 'MED';
+        const effort = qw.effort || 'MED';
+        html += `<li>
+          <strong>${esc(title)}</strong>
+          <span class="chip chipImpact${impact}">Impact: ${esc(impact)}</span>
+          <span class="chip chipEffort${effort}">Effort: ${esc(effort)}</span>
+        </li>`;
+      });
+      html += `</ul></div>`;
+    }
+    
+    html += `</div></div>`;
+  });
+  
+  container.innerHTML = html;
+}
+
+function togglePageAnalysis(idx) {
+  const body = document.getElementById(`pageBody${idx}`);
+  const toggle = document.getElementById(`pageToggle${idx}`);
+  if (body && toggle) {
+    if (body.style.display === 'none') {
+      body.style.display = 'block';
+      toggle.textContent = '▲';
+    } else {
+      body.style.display = 'none';
+      toggle.textContent = '▼';
+    }
+  }
+}
+
+function renderJourneyMap(journeySteps) {
+  const panel = document.getElementById('journeyMapPanel');
+  const container = document.getElementById('journeyMapContent');
+  
+  if (!journeySteps || journeySteps.length === 0) {
+    if (panel) panel.style.display = 'none';
+    return;
+  }
+  
+  if (panel) panel.style.display = 'block';
+  if (!container) return;
+  
+  let html = '<div class="journeySteps">';
+  journeySteps.forEach((step, idx) => {
+    const riskClass = (step.risk || 'MED').toLowerCase();
+    html += `<div class="journeyStep">
+      <div class="journeyStepHeader">
+        <div class="journeyStepName">${esc(step.step)}</div>
+        <span class="journeyRisk risk${riskClass}">${esc(step.risk || 'MED')} Risk</span>
+      </div>`;
+    
+    if (step.friction && step.friction.length > 0) {
+      html += `<div class="journeyFriction">
+        <strong>Friction:</strong>
+        <ul>`;
+      step.friction.forEach(f => {
+        html += `<li>${esc(f)}</li>`;
+      });
+      html += `</ul></div>`;
+    }
+    
+    if (step.fixes && step.fixes.length > 0) {
+      html += `<div class="journeyFixes">
+        <strong>Recommended Fixes:</strong>
+        <ul>`;
+      step.fixes.forEach(f => {
+        html += `<li>${esc(f)}</li>`;
+      });
+      html += `</ul></div>`;
+    }
+    
+    html += `</div>`;
+    if (idx < journeySteps.length - 1) {
+      html += '<div class="journeyArrow">→</div>';
+    }
+  });
+  html += '</div>';
+  
+  container.innerHTML = html;
+}
+
+function renderActionPlan(actionItems) {
+  const panel = document.getElementById('actionPlanPanel');
+  const container = document.getElementById('actionPlanContent');
+  
+  if (!actionItems || actionItems.length === 0) {
+    if (panel) panel.style.display = 'none';
+    return;
+  }
+  
+  if (panel) panel.style.display = 'block';
+  if (!container) return;
+  
+  // Sort by rank
+  const sorted = [...actionItems].sort((a, b) => (a.rank || 99) - (b.rank || 99));
+  
+  let html = '<div class="actionItems">';
+  sorted.slice(0, 10).forEach(item => {
+    const impact = item.impact || 'MED';
+    const effort = item.effort || 'MED';
+    html += `<div class="actionItem">
+      <div class="actionRank">${item.rank || '?'}</div>
+      <div class="actionContent">
+        <div class="actionTitle">${esc(item.title)}</div>
+        <div class="actionDescription">${esc(item.description)}</div>
+        <div class="actionMeta">
+          <span class="chip chipImpact${impact}">Impact: ${esc(impact)}</span>
+          <span class="chip chipEffort${effort}">Effort: ${esc(effort)}</span>
+        </div>
+      </div>
+    </div>`;
+  });
+  html += '</div>';
+  
+  container.innerHTML = html;
+}
+
+function renderRoadmap(phases) {
+  const panel = document.getElementById('roadmapPanel');
+  const container = document.getElementById('roadmapContent');
+  
+  if (!phases || phases.length === 0) {
+    if (panel) panel.style.display = 'none';
+    return;
+  }
+  
+  if (panel) panel.style.display = 'block';
+  if (!container) return;
+  
+  let html = '<div class="roadmapPhases">';
+  phases.forEach(phase => {
+    html += `<div class="roadmapPhase">
+      <div class="roadmapPhaseHeader">
+        <div class="roadmapPhaseName">${esc(phase.phase)}</div>
+        <div class="roadmapPhaseFocus">${esc(phase.focus)}</div>
+      </div>
+      <ul class="roadmapTasks">`;
+    (phase.tasks || []).forEach(task => {
+      html += `<li>${esc(task)}</li>`;
+    });
+    html += `</ul></div>`;
+  });
+  html += '</div>';
+  
+  container.innerHTML = html;
+}
+
 tick();
 </script>
 </body>
