@@ -1454,7 +1454,18 @@ def _img_to_data_url(path_str: Optional[str], max_dimension: int = 1600) -> Opti
                 background = Image.new('RGB', img.size, (255, 255, 255))
                 if img.mode == 'P':
                     img = img.convert('RGBA')
-                background.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+                
+                # Extract alpha channel based on mode
+                if img.mode == 'RGBA':
+                    # RGBA has alpha as the 4th channel
+                    alpha_channel = img.split()[3]
+                elif img.mode == 'LA':
+                    # LA has alpha as the 2nd channel
+                    alpha_channel = img.split()[1]
+                else:
+                    alpha_channel = None
+                
+                background.paste(img, mask=alpha_channel)
                 img = background
             elif img.mode != 'RGB':
                 img = img.convert('RGB')
@@ -2368,7 +2379,8 @@ Return output that fits the required JSON schema.
 
     # Mobile: send up to 3 screenshots if available and under limit
     if screenshot_count < max_screenshot_pages:
-        for u in (home_m.get("screenshot_urls") or [])[:min(3, max_screenshot_pages - screenshot_count)]:
+        mobile_limit = min(3, max_screenshot_pages - screenshot_count)
+        for u in (home_m.get("screenshot_urls") or [])[:mobile_limit]:
             img = _img_to_data_url(u)
             if img:
                 content.append({"type": "input_image", "image_url": img})
@@ -2378,9 +2390,9 @@ Return output that fits the required JSON schema.
     if is_deep_scan and additional_pages and screenshot_count < max_screenshot_pages:
         # Calculate how many pages we can still add screenshots from
         remaining_slots = max_screenshot_pages - screenshot_count
-        pages_to_process = additional_pages[:remaining_slots]
+        screenshot_eligible_pages = additional_pages[:remaining_slots]
         
-        for p in pages_to_process:
+        for p in screenshot_eligible_pages:
             # Add one desktop screenshot per additional page
             desktop_screenshots = p.get("desktop", {}).get("screenshot_urls", [])
             if desktop_screenshots:
