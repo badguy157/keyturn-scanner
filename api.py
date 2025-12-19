@@ -243,26 +243,48 @@ def db_safe(value: Any) -> Any:
     """
     Make a value safe for SQLite binding.
     
-    - Serializes dict/list/complex objects using json.dumps(..., default=str)
-    - Returns primitives (str, int, float, bool, None) unchanged
+    Returns only SQLite-safe primitives: None, str, int, float, bytes.
+    - Converts bool to int (SQLite doesn't have native bool type)
+    - JSON-serializes dict/list/tuple/set
+    - Handles Pydantic objects via model_dump() or .dict()
     - Converts exceptions to their string representation
     
     Args:
         value: Any value to make safe for SQLite binding
     
     Returns:
-        For primitives (str, int, float, bool, None): the original value unchanged
-        For exceptions: string representation via str()
-        For dict/list/other objects: JSON string via json.dumps(..., default=str)
-        On serialization failure: string representation via str()
+        Only SQLite-safe primitives: None, str, int, float, bytes
+        All complex types are converted to JSON strings
     
     This prevents sqlite3.InterfaceError: Error binding parameter ... unsupported type
     """
-    if value is None or isinstance(value, (str, int, float, bool)):
+    # Return SQLite-safe primitives unchanged
+    if value is None or isinstance(value, (str, int, float, bytes)):
         return value
+    
+    # Convert bool to int (SQLite doesn't have native bool type)
+    if isinstance(value, bool):
+        return int(value)
+    
+    # Convert exceptions to string
     if isinstance(value, Exception):
         return str(value)
-    # For dict, list, or any other complex object, serialize to JSON
+    
+    # Handle Pydantic objects by converting to dict first
+    if hasattr(value, "model_dump"):
+        try:
+            value = value.model_dump()  # pydantic v2
+        except Exception as e:
+            print(f"[DB_SAFE] Warning: model_dump() failed for {type(value).__name__}: {e}")
+            return str(value)
+    elif hasattr(value, "dict"):
+        try:
+            value = value.dict()  # pydantic v1
+        except Exception as e:
+            print(f"[DB_SAFE] Warning: dict() failed for {type(value).__name__}: {e}")
+            return str(value)
+    
+    # For dict, list, tuple, set, or any other complex object, serialize to JSON
     try:
         return json.dumps(value, default=str)
     except (TypeError, ValueError):
@@ -3271,7 +3293,7 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                 (
                     scan_id,
                     db_safe(synthesis.get("executive_summary", [])),
-                    synthesis.get("what_to_fix_first"),
+                    db_safe(synthesis.get("what_to_fix_first")),
                     db_safe(synthesis.get("journey_map", [])),
                     db_safe(synthesis.get("action_plan", [])),
                     db_safe(synthesis.get("roadmap_90d", [])),
