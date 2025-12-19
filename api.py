@@ -106,7 +106,7 @@ SCAN_STATUS_SCORING = "scoring"
 SCAN_MODE_QUICK = "quick"
 SCAN_MODE_DEEP = "deep"
 DEFAULT_MAX_PAGES_QUICK = 1
-DEFAULT_MAX_PAGES_DEEP = 8
+DEFAULT_MAX_PAGES_DEEP = 10
 MAX_PAGES_LIMIT = 50
 
 # User agent for HTTP requests
@@ -788,28 +788,125 @@ def _score_url(url: str) -> int:
     return score
 
 
+def _classify_page_type(url: str, anchor_text: str) -> str:
+    """Classify a page candidate into a type using URL + anchor text heuristics.
+    
+    Returns one of: booking/contact, service, proof, pricing/financing, about/doctor, faq/location, blog/news, policy, other
+    """
+    url_lower = url.lower()
+    anchor_lower = anchor_text.lower()
+    combined = url_lower + " " + anchor_lower
+    
+    # Booking/Contact (highest priority)
+    if any(k in combined for k in ["book", "appointment", "schedule", "consult", "contact", "call-us", "request"]):
+        return "booking/contact"
+    
+    # Service pages
+    if any(k in combined for k in ["service", "treatment", "procedure", "injection", "laser", "botox", "filler", "facial", "coolsculpt", "liposuction"]):
+        return "service"
+    
+    # Proof (reviews, before/after, gallery, testimonials)
+    if any(k in combined for k in ["review", "testimonial", "before-after", "before-and-after", "gallery", "result", "patient", "case-stud"]):
+        return "proof"
+    
+    # Pricing/Financing
+    if any(k in combined for k in ["pric", "cost", "payment", "financ", "afford", "special", "offer", "promotion"]):
+        return "pricing/financing"
+    
+    # About/Doctor
+    if any(k in combined for k in ["about", "doctor", "dr-", "dr.", "team", "staff", "physician", "meet-", "our-team", "credentials"]):
+        return "about/doctor"
+    
+    # FAQ/Location
+    if any(k in combined for k in ["faq", "question", "location", "direction", "hour", "contact-us", "find-us"]):
+        return "faq/location"
+    
+    # Blog/News (lower priority)
+    if any(k in combined for k in ["blog", "news", "article", "post", "media"]):
+        return "blog/news"
+    
+    # Policy (lowest priority)
+    if any(k in combined for k in ["privacy", "policy", "term", "legal", "hipaa", "disclaimer"]):
+        return "policy"
+    
+    return "other"
+
+
+def _score_page_candidate(url: str, anchor_text: str, page_type: str, is_cta: bool, location: str) -> float:
+    """Score a page candidate for selection priority.
+    
+    Args:
+        url: The page URL
+        anchor_text: The anchor text of the link
+        page_type: The classified page type
+        is_cta: Whether this is from a CTA link (book/consult/contact)
+        location: Where the link was found (header, footer, body)
+    
+    Returns:
+        Score (higher = more likely to be selected)
+    """
+    score = 0.0
+    
+    # Base score by page type (funnel-critical pages score higher)
+    type_scores = {
+        "booking/contact": 100,
+        "service": 80,
+        "proof": 70,
+        "pricing/financing": 75,
+        "about/doctor": 65,
+        "faq/location": 50,
+        "other": 40,
+        "blog/news": 20,
+        "policy": 10,
+    }
+    score += type_scores.get(page_type, 30)
+    
+    # Boost if CTA link
+    if is_cta:
+        score += 30
+    
+    # Boost by location (header/footer more important than body)
+    if location == "header":
+        score += 15
+    elif location == "footer":
+        score += 10
+    
+    # Small boost for clear, descriptive anchor text
+    if anchor_text and len(anchor_text.split()) >= 2 and len(anchor_text) <= 50:
+        score += 5
+    
+    return score
+
+
 def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
-    """Discover and prioritize internal pages to scan.
+    """Discover and prioritize internal pages to scan with smart classification.
+    
+    Implements URL candidate collector that:
+    1. Pulls internal links from homepage, header nav, footer, CTA links
+    2. Classifies each candidate by type using URL + anchor text heuristics
+    3. Scores and selects up to max_pages with balanced mix
+    4. Always includes home, prioritizes booking/contact, services, proof, pricing, about
+    5. Avoids blog/news/policy unless not enough candidates
     
     Args:
         seed_url: The starting URL to crawl
-        max_pages: Maximum number of pages to return
+        max_pages: Maximum number of pages to return (capped at 10)
     
     Returns:
         List of URLs to scan. The seed_url is guaranteed to be at index 0.
-        Additional URLs are prioritized by keyword scoring and deduplicated.
-        List length is up to max_pages (minimum 1, always includes seed_url).
+        Additional URLs are selected with balanced type distribution.
     """
-    print(f"[DISCOVER] Starting discovery for {seed_url}, max_pages={max_pages}")
+    print(f"[DISCOVER] Starting smart discovery for {seed_url}, max_pages={max_pages}")
     
     parsed_seed = urlparse(seed_url)
     seed_hostname = parsed_seed.netloc
     
-    discovered_urls = set()
-    scored_urls = []
+    # Track candidates with metadata
+    candidates = []
+    seen_urls = set()
     
     try:
-        # Try Playwright first, fallback to requests
+        # Fetch homepage
         html = None
         try:
             with sync_playwright() as p:
@@ -817,43 +914,55 @@ def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
                 page = browser.new_page()
                 page.set_default_timeout(15000)
                 page.goto(seed_url, wait_until="domcontentloaded", timeout=20000)
-                page.wait_for_timeout(1000)  # Brief wait for dynamic content
+                page.wait_for_timeout(1000)
                 html = page.content()
                 browser.close()
         except Exception as pw_err:
             print(f"[DISCOVER] Playwright failed ({pw_err}), falling back to requests")
             try:
-                response = requests.get(seed_url, timeout=15, headers={
-                    "User-Agent": USER_AGENT
-                })
+                response = requests.get(seed_url, timeout=15, headers={"User-Agent": USER_AGENT})
                 html = response.text
             except Exception as req_err:
-                print(f"[DISCOVER] Requests also failed: {req_err}")
-                # Return just the seed URL if we can't fetch anything
+                print(f"[DISCOVER] Requests failed: {req_err}")
                 return [seed_url]
         
         if not html:
             print("[DISCOVER] No HTML retrieved, returning seed URL only")
             return [seed_url]
         
-        # Parse HTML and extract links
         soup = BeautifulSoup(html, "html.parser")
         
+        # Identify header, footer, and body sections
+        header = soup.find("header") or soup.find(class_=re.compile(r"header|nav", re.I))
+        footer = soup.find("footer") or soup.find(class_=re.compile(r"footer", re.I))
+        
+        # Extract all links with metadata
         for a_tag in soup.find_all("a", href=True):
             href = a_tag.get("href", "").strip()
             if not href or href.startswith("#") or href.lower().startswith("javascript:"):
                 continue
             
-            # Make absolute URL
+            anchor_text = a_tag.get_text(" ", strip=True)
+            
+            # Determine location
+            location = "body"
+            if header and a_tag in header.find_all("a"):
+                location = "header"
+            elif footer and a_tag in footer.find_all("a"):
+                location = "footer"
+            
+            # Check if it's a CTA link
+            is_cta = bool(CTA_RE.search(anchor_text))
+            
             try:
                 abs_url = urljoin(seed_url, href)
                 parsed = urlparse(abs_url)
                 
-                # Only keep internal links (same hostname)
+                # Only internal links
                 if parsed.netloc != seed_hostname:
                     continue
                 
-                # Normalize URL (remove fragments)
+                # Normalize URL
                 normalized = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
                 if parsed.query:
                     normalized += f"?{parsed.query}"
@@ -862,40 +971,127 @@ def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
                 if _is_junk_url(normalized):
                     continue
                 
-                # Add to discovered set
-                if normalized not in discovered_urls:
-                    discovered_urls.add(normalized)
-                    score = _score_url(normalized)
-                    scored_urls.append((score, normalized))
-            
+                # Skip if already seen
+                if normalized in seen_urls:
+                    continue
+                seen_urls.add(normalized)
+                
+                # Classify and score
+                page_type = _classify_page_type(normalized, anchor_text)
+                score = _score_page_candidate(normalized, anchor_text, page_type, is_cta, location)
+                
+                candidates.append({
+                    "url": normalized,
+                    "type": page_type,
+                    "score": score,
+                    "anchor": anchor_text,
+                    "location": location,
+                    "is_cta": is_cta,
+                })
             except Exception:
                 continue
         
-        # Sort by score (highest first)
-        scored_urls.sort(reverse=True, key=lambda x: x[0])
+        # Sort candidates by score
+        candidates.sort(key=lambda x: x["score"], reverse=True)
         
-        # Build result list: seed URL first, then top scored URLs
-        result = [seed_url]
-        for score, url in scored_urls:
-            if url == seed_url:
-                continue  # Don't duplicate seed
-            if len(result) >= max_pages:
+        # Build balanced selection
+        selected = [seed_url]  # Always include home
+        type_counts = {}
+        
+        # Target mix (out of max_pages - 1, since home is guaranteed)
+        # Adjust these based on max_pages
+        remaining_slots = max_pages - 1
+        
+        # Priority selection strategy:
+        # 1. Always include 1 booking/contact if available
+        # 2. Include 3-4 services if available (or up to 40% of remaining)
+        # 3. Include 1 proof if available
+        # 4. Include 1 pricing/financing if available
+        # 5. Include 1 about/doctor if available
+        # 6. Fill remaining by score
+        
+        targets = {
+            "booking/contact": min(1, remaining_slots),
+            "service": min(max(3, int(remaining_slots * 0.4)), remaining_slots),
+            "proof": min(1, remaining_slots),
+            "pricing/financing": min(1, remaining_slots),
+            "about/doctor": min(1, remaining_slots),
+            "faq/location": min(1, remaining_slots),
+        }
+        
+        # First pass: fill priority types up to targets
+        for candidate in candidates:
+            if len(selected) >= max_pages:
                 break
-            result.append(url)
+            
+            url = candidate["url"]
+            if url == seed_url:
+                continue  # Already included
+            
+            page_type = candidate["type"]
+            current_count = type_counts.get(page_type, 0)
+            target_count = targets.get(page_type, 0)
+            
+            # Skip blog/news/policy in first pass
+            if page_type in ["blog/news", "policy"]:
+                continue
+            
+            # Add if under target for this type
+            if current_count < target_count:
+                selected.append(url)
+                type_counts[page_type] = current_count + 1
         
-        # Create a score lookup map for efficient logging
-        score_map = {url: score for score, url in scored_urls}
+        # Second pass: fill remaining slots with highest-scoring pages (excluding blog/policy)
+        for candidate in candidates:
+            if len(selected) >= max_pages:
+                break
+            
+            url = candidate["url"]
+            if url in selected:
+                continue
+            
+            page_type = candidate["type"]
+            
+            # Still avoid blog/news/policy unless desperate
+            if page_type in ["blog/news", "policy"]:
+                continue
+            
+            selected.append(url)
+            type_counts[page_type] = type_counts.get(page_type, 0) + 1
         
-        print(f"[DISCOVER] Found {len(discovered_urls)} internal URLs, returning top {len(result)}")
-        for i, url in enumerate(result[:10]):  # Log first 10
-            score = score_map.get(url, 0)
-            print(f"  [{i+1}] (score={score}) {url}")
+        # Third pass: if still not at max_pages, include blog/news/other (but not policy)
+        if len(selected) < max_pages:
+            for candidate in candidates:
+                if len(selected) >= max_pages:
+                    break
+                
+                url = candidate["url"]
+                if url in selected:
+                    continue
+                
+                if candidate["type"] == "policy":
+                    continue  # Still skip policy
+                
+                selected.append(url)
+                type_counts[candidate["type"]] = type_counts.get(candidate["type"], 0) + 1
         
-        return result
+        # Log selection
+        print(f"[DISCOVER] Found {len(candidates)} candidates, selected {len(selected)} pages")
+        print(f"[DISCOVER] Type distribution: {type_counts}")
+        for i, url in enumerate(selected[:10]):
+            # Find candidate info for logging
+            candidate_info = next((c for c in candidates if c["url"] == url), None)
+            if i == 0:
+                print(f"  [1] (home) {url}")
+            elif candidate_info:
+                print(f"  [{i+1}] ({candidate_info['type']}, score={candidate_info['score']:.0f}) {url}")
+            else:
+                print(f"  [{i+1}] {url}")
+        
+        return selected
     
     except Exception as e:
         print(f"[DISCOVER] Error during discovery: {e}")
-        # Always return at least the seed URL
         return [seed_url]
 
 
@@ -1133,7 +1329,7 @@ def fetch_page_evidence(
             headless=True,
             args=["--disable-dev-shm-usage", "--no-sandbox"],
         )
-        viewport = {"width": 390, "height": 844} if mobile else {"width": 1365, "height": 768}
+        viewport = {"width": 390, "height": 844} if mobile else {"width": 1440, "height": 900}
 
         context = browser.new_context(
             viewport=viewport,
@@ -1189,14 +1385,45 @@ def fetch_page_evidence(
                 for sp in screenshot_paths:
                     sp.parent.mkdir(parents=True, exist_ok=True)
 
+                # Get scroll positions for both desktop and mobile
+                pos = _get_scroll_positions(page)
+                
                 if not mobile:
-                    try_shot("home_desktop_top", screenshot_paths[0], scroll_y=0)
+                    # Desktop: capture top, mid, bottom slices (like mobile)
+                    if len(screenshot_paths) > 0:
+                        try_shot("home_desktop_top", screenshot_paths[0], scroll_y=pos["top"])
+                        # Dispatch scroll event to trigger lazy-loaded images
+                        try:
+                            page.evaluate("window.dispatchEvent(new Event('scroll'))")
+                            page.wait_for_timeout(300)
+                        except Exception:
+                            pass
+                    if len(screenshot_paths) > 1:
+                        try_shot("home_desktop_mid", screenshot_paths[1], scroll_y=pos["mid"])
+                        try:
+                            page.evaluate("window.dispatchEvent(new Event('scroll'))")
+                            page.wait_for_timeout(300)
+                        except Exception:
+                            pass
+                    if len(screenshot_paths) > 2:
+                        try_shot("home_desktop_bottom", screenshot_paths[2], scroll_y=pos["bottom"])
                 else:
-                    pos = _get_scroll_positions(page)
+                    # Mobile: capture top, mid, bottom slices
                     if len(screenshot_paths) > 0:
                         try_shot("home_mobile_top", screenshot_paths[0], scroll_y=pos["top"])
+                        # Dispatch scroll event to trigger lazy-loaded images
+                        try:
+                            page.evaluate("window.dispatchEvent(new Event('scroll'))")
+                            page.wait_for_timeout(300)
+                        except Exception:
+                            pass
                     if len(screenshot_paths) > 1:
                         try_shot("home_mobile_mid", screenshot_paths[1], scroll_y=pos["mid"])
+                        try:
+                            page.evaluate("window.dispatchEvent(new Event('scroll'))")
+                            page.wait_for_timeout(300)
+                        except Exception:
+                            pass
                     if len(screenshot_paths) > 2:
                         try_shot("home_mobile_bottom", screenshot_paths[2], scroll_y=pos["bottom"])
 
@@ -1673,7 +1900,11 @@ def capture_page(url: str, scan_dir: Path, page_index: int = 0) -> Dict[str, Any
         desktop_data = fetch_page_evidence(
             url=url,
             mobile=False,
-            screenshot_paths=[scan_dir / f"{prefix}_desktop_top.jpg"],
+            screenshot_paths=[
+                scan_dir / f"{prefix}_desktop_top.jpg",
+                scan_dir / f"{prefix}_desktop_mid.jpg",
+                scan_dir / f"{prefix}_desktop_bottom.jpg",
+            ],
         )
     except Exception as e:
         print(f"[CAPTURE] Desktop capture failed for {url}: {e}")
@@ -4480,7 +4711,9 @@ async function downloadPDF() {
 }
 
 const KEY_LABELS = {
-  "home_desktop_top": "Homepage - Desktop",
+  "home_desktop_top": "Homepage - Desktop (top)",
+  "home_desktop_mid": "Homepage - Desktop (mid)",
+  "home_desktop_bottom": "Homepage - Desktop (bottom)",
   "home_mobile_top": "Homepage - Mobile (top)",
   "home_mobile_mid": "Homepage - Mobile (mid)",
   "home_mobile_bottom": "Homepage - Mobile (bottom)"
