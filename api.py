@@ -102,6 +102,7 @@ EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 # Constants
 MAX_PUBLIC_ID_ATTEMPTS = 10
 SCAN_STATUS_DONE = "done"
+SCAN_STATUS_DONE_WITH_ERRORS = "done_with_errors"
 SCAN_STATUS_ERROR = "error"
 SCAN_STATUS_QUEUED = "queued"
 SCAN_STATUS_RUNNING = "running"  # Deprecated - use SCANNING instead
@@ -3134,6 +3135,13 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
         captured_pages = []
         pages_scanned = 0
         
+        # Initialize tracking variables for deep mode error handling
+        successful_page_analyses = 0
+        failed_page_analyses = 0
+        page_errors = []
+        synthesis_succeeded = True  # Default to True for non-deep scans
+        synthesis_error = None
+        
         for i, page_url in enumerate(urls_to_scan):
             try:
                 print(f"[SCAN] Capturing page {i+1}/{len(urls_to_scan)}: {page_url}")
@@ -3200,6 +3208,11 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
             # Track page count for garbage collection
             pages_processed = 0
             
+            # Reset tracking variables for deep scan (overwrite defaults)
+            successful_page_analyses = 0
+            failed_page_analyses = 0
+            page_errors = []
+            
             for i, page_data in enumerate(captured_pages):
                 page_url = page_data.get("url", "")
                 desktop_data = page_data.get("desktop", {})
@@ -3208,6 +3221,8 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                 # Skip if page had errors during capture
                 if desktop_data.get("error") and mobile_data.get("error"):
                     print(f"[SCAN] Skipping analysis for {page_url} (capture failed)")
+                    failed_page_analyses += 1
+                    page_errors.append(f"{page_url}: {desktop_data.get('error')}")
                     error_analysis = {
                         "url": page_url,
                         "page_type": "unknown",
@@ -3282,6 +3297,14 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                     touch_scan(scan_id)
                     analysis["url"] = page_url  # Ensure URL is set
                     
+                    # Check if analysis contains an error
+                    if analysis.get("error"):
+                        failed_page_analyses += 1
+                        page_errors.append(f"{page_url}: {analysis.get('error')}")
+                        print(f"[SCAN] Page analysis returned error for {page_url}: {analysis.get('error')}")
+                    else:
+                        successful_page_analyses += 1
+                    
                     # Store page analysis in database immediately
                     conn.execute(
                         """
@@ -3319,6 +3342,8 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                     
                 except Exception as page_err:
                     print(f"[SCAN] Error analyzing {page_url}: {page_err}")
+                    failed_page_analyses += 1
+                    page_errors.append(f"{page_url}: {str(page_err)}")
                     error_analysis = {
                         "url": page_url,
                         "page_type": "unknown",
@@ -3367,6 +3392,10 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                     except Exception as e:
                         print(f"[SCAN] Failed to parse analysis JSON: {e}")
             
+            # Track synthesis success/failure
+            synthesis_succeeded = False
+            synthesis_error = None
+            
             # Synthesize deep scan results
             print(f"[SCAN] Synthesizing deep scan results from {len(page_analyses)} page analyses")
             clinic_name = infer_clinic_name(
@@ -3375,52 +3404,63 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                 str(url)
             )
             
-            # Touch before synthesis to prevent timeout
-            touch_scan(scan_id)
-            synthesis = synthesize_deep_scan(page_analyses, clinic_name)
-            # Touch after synthesis completes
-            touch_scan(scan_id)
-            
-            # Free page_analyses memory before storing synthesis
-            del page_analyses
-            gc.collect()
-            
-            # Create slim synthesis with only required fields
-            synthesis_slim = {
-                "executive_summary": synthesis.get("executive_summary", []),
-                "what_to_fix_first": synthesis.get("what_to_fix_first"),
-                "journey_map": synthesis.get("journey_map", []),
-                "action_plan": synthesis.get("action_plan", []),
-                "roadmap_90d": synthesis.get("roadmap_90d", []),
-                "coverage": synthesis.get("coverage", {}),
-            }
-            
-            # Store slim synthesis in database (no raw_html, screenshots, or page_analyses)
-            conn.execute(
-                """
-                INSERT INTO scan_summaries 
-                (scan_id, executive_summary, what_to_fix_first, journey_map, action_plan, roadmap_90d, coverage, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    scan_id,
-                    db_safe(synthesis_slim.get("executive_summary", [])),
-                    db_safe(synthesis_slim.get("what_to_fix_first")),
-                    db_safe(synthesis_slim.get("journey_map", [])),
-                    db_safe(synthesis_slim.get("action_plan", [])),
-                    db_safe(synthesis_slim.get("roadmap_90d", [])),
-                    db_safe(synthesis_slim.get("coverage", {})),
-                    now_iso(),
-                ),
-            )
-            conn.commit()
-            
-            # Free synthesis memory
-            del synthesis
-            del synthesis_slim
-            gc.collect()
-            
-            print(f"[SCAN] Deep scan synthesis complete and stored in database")
+            try:
+                # Touch before synthesis to prevent timeout
+                touch_scan(scan_id)
+                synthesis = synthesize_deep_scan(page_analyses, clinic_name)
+                # Touch after synthesis completes
+                touch_scan(scan_id)
+                
+                # Free page_analyses memory before storing synthesis
+                del page_analyses
+                gc.collect()
+                
+                # Create slim synthesis with only required fields
+                synthesis_slim = {
+                    "executive_summary": synthesis.get("executive_summary", []),
+                    "what_to_fix_first": synthesis.get("what_to_fix_first"),
+                    "journey_map": synthesis.get("journey_map", []),
+                    "action_plan": synthesis.get("action_plan", []),
+                    "roadmap_90d": synthesis.get("roadmap_90d", []),
+                    "coverage": synthesis.get("coverage", {}),
+                }
+                
+                # Store slim synthesis in database (no raw_html, screenshots, or page_analyses)
+                conn.execute(
+                    """
+                    INSERT INTO scan_summaries 
+                    (scan_id, executive_summary, what_to_fix_first, journey_map, action_plan, roadmap_90d, coverage, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        scan_id,
+                        db_safe(synthesis_slim.get("executive_summary", [])),
+                        db_safe(synthesis_slim.get("what_to_fix_first")),
+                        db_safe(synthesis_slim.get("journey_map", [])),
+                        db_safe(synthesis_slim.get("action_plan", [])),
+                        db_safe(synthesis_slim.get("roadmap_90d", [])),
+                        db_safe(synthesis_slim.get("coverage", {})),
+                        now_iso(),
+                    ),
+                )
+                conn.commit()
+                
+                # Free synthesis memory
+                del synthesis
+                del synthesis_slim
+                gc.collect()
+                
+                synthesis_succeeded = True
+                print(f"[SCAN] Deep scan synthesis complete and stored in database")
+            except Exception as synthesis_err:
+                synthesis_error = str(synthesis_err)
+                print(f"[SCAN] Synthesis failed: {synthesis_err}")
+                import traceback
+                traceback.print_exc()
+                # Free page_analyses memory even on error
+                if 'page_analyses' in locals():
+                    del page_analyses
+                gc.collect()
 
         # Score the pages (this provides backward compatibility)
         # Touch before scoring to prevent timeout
@@ -3439,10 +3479,39 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
             domain = parsed.netloc.replace("www.", "")
             slug = slugify(domain)
         
+        # Determine final scan status based on deep mode results
+        final_status = SCAN_STATUS_DONE
+        error_message = None
+        
+        # For deep mode scans, check synthesis and page analysis results
+        if mode == "deep" and len(captured_pages) > 1:
+            # Determine status based on synthesis success and page analysis results
+            if not synthesis_succeeded:
+                # Synthesis failed - set to error
+                final_status = SCAN_STATUS_ERROR
+                error_message = f"Synthesis failed: {synthesis_error}"
+                print(f"[SCAN] Setting status to ERROR: synthesis failed")
+            elif successful_page_analyses == 0:
+                # No successful page analyses - set to error
+                final_status = SCAN_STATUS_ERROR
+                error_message = f"All {failed_page_analyses} page analyses failed"
+                print(f"[SCAN] Setting status to ERROR: no successful page analyses")
+            elif failed_page_analyses > 0:
+                # Some pages failed but synthesis succeeded - set to done_with_errors
+                final_status = SCAN_STATUS_DONE_WITH_ERRORS
+                error_message = f"{failed_page_analyses} of {successful_page_analyses + failed_page_analyses} pages failed: {'; '.join(page_errors[:3])}"
+                if len(page_errors) > 3:
+                    error_message += f" (and {len(page_errors) - 3} more)"
+                print(f"[SCAN] Setting status to DONE_WITH_ERRORS: {failed_page_analyses} pages failed")
+            else:
+                # All succeeded
+                final_status = SCAN_STATUS_DONE
+                print(f"[SCAN] Setting status to DONE: all {successful_page_analyses} pages succeeded")
+        
         # Update scans with slug and pages_scanned before marking as done
         conn.execute(
             "UPDATE scans SET status=?, updated_at=?, finished_at=?, evidence_json=?, score_json=?, error=?, slug=?, pages_scanned=?, progress_step=?, progress_pct=? WHERE id=?",
-            (SCAN_STATUS_DONE, now_iso(), now_iso(), db_safe(evidence), db_safe(output), None, slug, pages_scanned, "completed", 100, scan_id),
+            (final_status, now_iso(), now_iso(), db_safe(evidence), db_safe(output), error_message, slug, pages_scanned, "completed", 100, scan_id),
         )
         conn.commit()
         
@@ -7325,7 +7394,7 @@ async function tick() {
     if (st === 'queued' || st === 'running' || st === 'scanning' || st === 'scoring') {
       shouldContinuePolling = true;
     } else {
-      // Scan is done/error/timed_out - fetch full data once and stop polling
+      // Scan is done/error/done_with_errors/timed_out - fetch full data once and stop polling
       shouldContinuePolling = false;
       
       // Fetch full scan data with all the details
