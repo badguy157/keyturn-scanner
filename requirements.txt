@@ -6,3 +6,5 @@ openai
 pydantic
 resend
 requests
+httpx
+Pillow

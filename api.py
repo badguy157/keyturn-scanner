@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urljoin, urlparse
 
+import httpx
 import requests
 from bs4 import BeautifulSoup, Comment
 from fastapi import FastAPI, HTTPException, Request
@@ -49,8 +50,10 @@ from playwright.sync_api import sync_playwright
 # Import OpenAI safely so missing module doesn't crash the whole server at import-time.
 try:
     from openai import OpenAI  # type: ignore
+    import openai  # For APITimeoutError
 except Exception:
     OpenAI = None  # type: ignore
+    openai = None  # type: ignore
 
 # Import Resend safely
 try:
@@ -1417,7 +1420,16 @@ def _clean_text(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
 
 
-def _img_to_data_url(path_str: Optional[str]) -> Optional[str]:
+def _img_to_data_url(path_str: Optional[str], max_dimension: int = 1600) -> Optional[str]:
+    """Convert image to data URL with optional downscaling.
+    
+    Args:
+        path_str: Path to image file (can be relative to artifacts or absolute)
+        max_dimension: Maximum width or height in pixels (default: 1600)
+    
+    Returns:
+        Data URL string or None if file doesn't exist
+    """
     if not path_str:
         return None
     if path_str.startswith("/artifacts/"):
@@ -1429,12 +1441,55 @@ def _img_to_data_url(path_str: Optional[str]) -> Optional[str]:
     if not p.exists():
         return None
 
-    mime = guess_mime(str(p))
-    # For images, fall back to image/jpeg if MIME type is unknown
-    if mime == "application/octet-stream":
-        mime = "image/jpeg"
-    b64 = base64.b64encode(p.read_bytes()).decode("utf-8")
-    return f"data:{mime};base64,{b64}"
+    try:
+        # Import PIL here to avoid import errors if Pillow is not installed
+        from PIL import Image
+        import io
+        
+        # Open and potentially downscale the image
+        with Image.open(p) as img:
+            # Convert RGBA to RGB if necessary (for JPEG encoding)
+            if img.mode in ('RGBA', 'LA', 'P'):
+                # Create white background
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                background.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+                img = background
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Downscale if image is larger than max_dimension
+            width, height = img.size
+            if width > max_dimension or height > max_dimension:
+                # Calculate new dimensions maintaining aspect ratio
+                if width > height:
+                    new_width = max_dimension
+                    new_height = int(height * (max_dimension / width))
+                else:
+                    new_height = max_dimension
+                    new_width = int(width * (max_dimension / height))
+                
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            
+            # Save to bytes buffer as JPEG with quality 85
+            buffer = io.BytesIO()
+            img.save(buffer, format='JPEG', quality=85, optimize=True)
+            img_bytes = buffer.getvalue()
+            
+        # Encode to base64
+        b64 = base64.b64encode(img_bytes).decode("utf-8")
+        return f"data:image/jpeg;base64,{b64}"
+        
+    except Exception as e:
+        # Fallback to original behavior if PIL fails
+        print(f"[IMAGE] Failed to process image with PIL ({e}), using original")
+        mime = guess_mime(str(p))
+        # For images, fall back to image/jpeg if MIME type is unknown
+        if mime == "application/octet-stream":
+            mime = "image/jpeg"
+        b64 = base64.b64encode(p.read_bytes()).decode("utf-8")
+        return f"data:{mime};base64,{b64}"
 
 
 def band_from_score(score10: float) -> str:
@@ -2085,19 +2140,38 @@ def _post_guardrails(output: Dict[str, Any], evidence: Dict[str, Any]) -> Dict[s
     return output
 
 
-def ai_score_patient_flow(target_url: str, evidence: Dict[str, Any]) -> Dict[str, Any]:
+def ai_score_patient_flow(target_url: str, evidence: Dict[str, Any], scan_id: Optional[str] = None) -> Dict[str, Any]:
+    """Score a patient flow website using OpenAI with timeout and error handling.
+    
+    Args:
+        target_url: The URL being scored
+        evidence: Evidence dictionary with page data
+        scan_id: Optional scan ID for progress tracking
+    
+    Returns:
+        Scoring output dictionary
+    """
     ok, msg = _ai_ready()
     if not ok:
         raise RuntimeError(msg)
 
-    # Initialize OpenAI client with timeout (90s connect, 180s read, 90s write)
-    # These values are chosen to:
-    # - connect=90s: Allow time for connection in slow networks
-    # - read=180s: Long enough for large model responses, but prevent indefinite hangs
-    # - write=90s: Sufficient for uploading screenshots and evidence
-    import httpx
-    timeout = httpx.Timeout(90.0, read=180.0, write=90.0, connect=90.0)
-    client = OpenAI(timeout=timeout)  # type: ignore
+    # Initialize OpenAI client with max_retries=0 and custom timeout
+    # Timeout values: connect=90s, read=180s, write=60s, pool=90s
+    timeout = httpx.Timeout(connect=90.0, read=180.0, write=60.0, pool=90.0)
+    client = OpenAI(timeout=timeout, max_retries=0)  # type: ignore
+    
+    # Update progress before model call
+    if scan_id:
+        try:
+            conn = db()
+            conn.execute(
+                "UPDATE scans SET progress_step=?, progress_pct=?, updated_at=? WHERE id=?",
+                ("calling_model", 65, now_iso(), scan_id)
+            )
+            conn.commit()
+            conn.close()
+        except Exception as progress_err:
+            print(f"[PROGRESS] Failed to update progress before model call: {progress_err}")
 
     home_d = evidence.get("home_desktop", {})
     home_m = evidence.get("home_mobile", {})
@@ -2275,17 +2349,38 @@ Return output that fits the required JSON schema.
         }
     ]
 
+    # Limit screenshots to max 8 pages total (home + additional pages)
+    # For deep scans with screenshots, limit images sent to OpenAI
+    max_screenshot_pages = 8
+    screenshot_count = 0
+    
     # Desktop: send 1 screenshot if available
-    for u in (home_d.get("screenshot_urls") or [])[:1]:
-        img = _img_to_data_url(u)
-        if img:
-            content.append({"type": "input_image", "image_url": img})
+    if screenshot_count < max_screenshot_pages:
+        for u in (home_d.get("screenshot_urls") or [])[:1]:
+            img = _img_to_data_url(u)
+            if img:
+                content.append({"type": "input_image", "image_url": img})
+                screenshot_count += 1
 
-    # Mobile: send up to 3 screenshots if available
-    for u in (home_m.get("screenshot_urls") or [])[:3]:
-        img = _img_to_data_url(u)
-        if img:
-            content.append({"type": "input_image", "image_url": img})
+    # Mobile: send up to 3 screenshots if available and under limit
+    if screenshot_count < max_screenshot_pages:
+        for u in (home_m.get("screenshot_urls") or [])[:min(3, max_screenshot_pages - screenshot_count)]:
+            img = _img_to_data_url(u)
+            if img:
+                content.append({"type": "input_image", "image_url": img})
+                screenshot_count += 1
+    
+    # For deep scans, add screenshots from additional pages (limit to max_screenshot_pages total)
+    if is_deep_scan and additional_pages and screenshot_count < max_screenshot_pages:
+        pages_with_screenshots = min(len(additional_pages), max_screenshot_pages - screenshot_count)
+        for p in additional_pages[:pages_with_screenshots]:
+            # Add one desktop screenshot per additional page
+            desktop_screenshots = p.get("desktop", {}).get("screenshot_urls", [])
+            if desktop_screenshots and screenshot_count < max_screenshot_pages:
+                img = _img_to_data_url(desktop_screenshots[0])
+                if img:
+                    content.append({"type": "input_image", "image_url": img})
+                    screenshot_count += 1
 
     last_err: Optional[Exception] = None
 
@@ -2394,13 +2489,63 @@ Return output that fits the required JSON schema.
                     out["quick_wins_detailed"] = data["quick_wins_detailed"]
 
             out = _post_guardrails(out, evidence)
+            
+            # Update progress after successful model call
+            if scan_id:
+                try:
+                    conn = db()
+                    conn.execute(
+                        "UPDATE scans SET progress_step=?, progress_pct=?, updated_at=? WHERE id=?",
+                        ("model_response_received", 90, now_iso(), scan_id)
+                    )
+                    conn.commit()
+                    conn.close()
+                except Exception as progress_err:
+                    print(f"[PROGRESS] Failed to update progress after model call: {progress_err}")
+            
             return out
 
         except Exception as e:
+            # Check if it's a timeout error
+            if openai and hasattr(openai, 'APITimeoutError') and isinstance(e, openai.APITimeoutError):
+                # Handle timeout specifically
+                print(f"[SCORING] OpenAI request timed out (no retries): {repr(e)}")
+                if scan_id:
+                    try:
+                        conn = db()
+                        conn.execute(
+                            "UPDATE scans SET status=?, error=?, finished_at=?, updated_at=?, progress_step=? WHERE id=?",
+                            ("timed_out", "OpenAI request timed out (no retries).", now_iso(), now_iso(), "timeout", scan_id)
+                        )
+                        conn.commit()
+                        conn.close()
+                    except Exception as db_err:
+                        print(f"[SCORING] Failed to update database for timeout: {db_err}")
+                # Re-raise to be caught by outer handler
+                raise RuntimeError("OpenAI request timed out (no retries).") from e
+            
+            # Generic exception - store repr(e) and continue trying next model
+            print(f"[SCORING] Model {model} failed: {repr(e)}")
             last_err = e
             continue
 
-    raise RuntimeError(f"AI scoring failed. Last error: {last_err}")
+    # All models failed
+    error_msg = f"AI scoring failed. Last error: {repr(last_err)}"
+    
+    # Update scan with error status if scan_id provided
+    if scan_id:
+        try:
+            conn = db()
+            conn.execute(
+                "UPDATE scans SET status=?, error=?, finished_at=?, updated_at=?, progress_step=? WHERE id=?",
+                ("error", error_msg[:ERROR_MESSAGE_MAX_LENGTH], now_iso(), now_iso(), "error", scan_id)
+            )
+            conn.commit()
+            conn.close()
+        except Exception as db_err:
+            print(f"[SCORING] Failed to update database for error: {db_err}")
+    
+    raise RuntimeError(error_msg)
 
 
 def capture_page(url: str, scan_dir: Path, page_index: int = 0) -> Dict[str, Any]:
@@ -2493,7 +2638,9 @@ def analyze_single_page(
         }
     
     try:
-        client = OpenAI()  # type: ignore
+        # Initialize OpenAI client with max_retries=0 and custom timeout
+        timeout = httpx.Timeout(connect=90.0, read=180.0, write=60.0, pool=90.0)
+        client = OpenAI(timeout=timeout, max_retries=0)  # type: ignore
         
         # Trim HTML to avoid token blowups
         trimmed_html = trim_html_for_ai(html_content, max_chars=6000)
@@ -2582,7 +2729,21 @@ Be specific and actionable. Use evidence from the HTML and screenshots.
         return data
         
     except Exception as e:
-        print(f"[ANALYZE_PAGE] Error analyzing {page_url}: {e}")
+        # Check if it's a timeout error
+        if openai and hasattr(openai, 'APITimeoutError') and isinstance(e, openai.APITimeoutError):
+            print(f"[ANALYZE_PAGE] OpenAI request timed out for {page_url}: {repr(e)}")
+            return {
+                "page_type": page_type,
+                "summary": f"Analysis timed out (no retries).",
+                "strengths": [],
+                "leaks": [],
+                "quick_wins": [],
+                "notes": {},
+                "error": "OpenAI request timed out (no retries).",
+            }
+        
+        # Generic error
+        print(f"[ANALYZE_PAGE] Error analyzing {page_url}: {repr(e)}")
         return {
             "page_type": page_type,
             "summary": f"Analysis failed: {str(e)}",
@@ -2590,7 +2751,7 @@ Be specific and actionable. Use evidence from the HTML and screenshots.
             "leaks": [],
             "quick_wins": [],
             "notes": {},
-            "error": str(e),
+            "error": repr(e),
         }
 
 
@@ -2618,7 +2779,9 @@ def synthesize_deep_scan(page_analyses: List[Dict[str, Any]], clinic_name: str) 
         }
     
     try:
-        client = OpenAI()  # type: ignore
+        # Initialize OpenAI client with max_retries=0 and custom timeout
+        timeout = httpx.Timeout(connect=90.0, read=180.0, write=60.0, pool=90.0)
+        client = OpenAI(timeout=timeout, max_retries=0)  # type: ignore
         
         # Build summary of page analyses
         pages_summary = []
@@ -2720,7 +2883,21 @@ IMPORTANT: You MUST provide ALL sections with the minimum requirements specified
         return data
         
     except Exception as e:
-        print(f"[SYNTHESIZE] Error synthesizing deep scan: {e}")
+        # Check if it's a timeout error
+        if openai and hasattr(openai, 'APITimeoutError') and isinstance(e, openai.APITimeoutError):
+            print(f"[SYNTHESIZE] OpenAI request timed out: {repr(e)}")
+            return {
+                "executive_summary": ["Deep scan synthesis timed out (no retries)."],
+                "what_to_fix_first": "Unable to generate recommendation - request timed out",
+                "journey_map": [],
+                "action_plan": [],
+                "roadmap_90d": [],
+                "coverage": {"scanned_pages": [], "missing_recommended": []},
+                "error": "OpenAI request timed out (no retries).",
+            }
+        
+        # Generic error
+        print(f"[SYNTHESIZE] Error synthesizing deep scan: {repr(e)}")
         return {
             "executive_summary": [f"Synthesis failed: {str(e)}"],
             "what_to_fix_first": "Unable to generate recommendation",
@@ -2728,11 +2905,11 @@ IMPORTANT: You MUST provide ALL sections with the minimum requirements specified
             "action_plan": [],
             "roadmap_90d": [],
             "coverage": {"scanned_pages": [], "missing_recommended": []},
-            "error": str(e),
+            "error": repr(e),
         }
 
 
-def analyze_pages(pages: List[Dict[str, Any]], target_url: str) -> Dict[str, Any]:
+def analyze_pages(pages: List[Dict[str, Any]], target_url: str, scan_id: Optional[str] = None) -> Dict[str, Any]:
     """Analyze captured pages and generate scores.
     
     NOTE: Currently, scoring only uses the first page (home/seed URL) evidence.
@@ -2745,6 +2922,7 @@ def analyze_pages(pages: List[Dict[str, Any]], target_url: str) -> Dict[str, Any
     Args:
         pages: List of captured page data (each with desktop/mobile evidence)
         target_url: The original target URL for the scan
+        scan_id: Optional scan ID for progress tracking
     
     Returns:
         Scoring output dictionary
@@ -2775,7 +2953,7 @@ def analyze_pages(pages: List[Dict[str, Any]], target_url: str) -> Dict[str, Any
     if SCORING_MODE == "rules":
         output = score_rules_only(evidence)
     else:
-        output = ai_score_patient_flow(target_url, evidence)
+        output = ai_score_patient_flow(target_url, evidence, scan_id=scan_id)
     
     return output
 
@@ -2998,7 +3176,7 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
             print(f"[SCAN] Deep scan synthesis complete and stored in database")
 
         # Score the pages (this provides backward compatibility)
-        output = analyze_pages(captured_pages, str(url))
+        output = analyze_pages(captured_pages, str(url), scan_id=scan_id)
 
         # Generate slug from clinic_name or fallback to domain
         clinic_name = output.get("clinic_name", "")
