@@ -256,6 +256,12 @@ def _ensure_columns() -> None:
             conn.execute("ALTER TABLE scans ADD COLUMN finished_at TEXT")
         conn.commit()
         
+        # Add what_to_fix_first column to scan_summaries table if it doesn't exist
+        summary_cols = {r["name"] for r in conn.execute("PRAGMA table_info(scan_summaries)").fetchall()}
+        if "what_to_fix_first" not in summary_cols:
+            conn.execute("ALTER TABLE scan_summaries ADD COLUMN what_to_fix_first TEXT")
+            conn.commit()
+        
         # Create UNIQUE index on public_id if it doesn't exist
         try:
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_public_id ON scans(public_id)")
@@ -2970,12 +2976,13 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
             conn.execute(
                 """
                 INSERT INTO scan_summaries 
-                (scan_id, executive_summary, journey_map, action_plan, roadmap_90d, coverage, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (scan_id, executive_summary, what_to_fix_first, journey_map, action_plan, roadmap_90d, coverage, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
                     json.dumps(synthesis.get("executive_summary", [])),
+                    synthesis.get("what_to_fix_first"),
                     json.dumps(synthesis.get("journey_map", [])),
                     json.dumps(synthesis.get("action_plan", [])),
                     json.dumps(synthesis.get("roadmap_90d", [])),
@@ -3962,6 +3969,7 @@ def get_scan(scan_id: str):
             if summary_row:
                 deep_scan_data["synthesis"] = {
                     "executive_summary": json.loads(summary_row["executive_summary"]) if summary_row["executive_summary"] else None,
+                    "what_to_fix_first": summary_row.get("what_to_fix_first"),
                     "journey_map": json.loads(summary_row["journey_map"]) if summary_row["journey_map"] else None,
                     "action_plan": json.loads(summary_row["action_plan"]) if summary_row["action_plan"] else None,
                     "roadmap_90d": json.loads(summary_row["roadmap_90d"]) if summary_row["roadmap_90d"] else None,
@@ -4109,6 +4117,7 @@ def get_report_json(scan_id: str):
             if summary_row:
                 deep_scan_data["synthesis"] = {
                     "executive_summary": json.loads(summary_row["executive_summary"]) if summary_row["executive_summary"] else None,
+                    "what_to_fix_first": summary_row.get("what_to_fix_first"),
                     "journey_map": json.loads(summary_row["journey_map"]) if summary_row["journey_map"] else None,
                     "action_plan": json.loads(summary_row["action_plan"]) if summary_row["action_plan"] else None,
                     "roadmap_90d": json.loads(summary_row["roadmap_90d"]) if summary_row["roadmap_90d"] else None,
