@@ -551,6 +551,35 @@ def _model_to_dict(m: Any) -> Dict[str, Any]:
     return dict(m)
 
 
+def _extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
+    """Extract JSON object from text that may contain markdown or other wrapping.
+    
+    Tries to find the first { and last } and parse what's between them.
+    Returns None if no valid JSON is found.
+    """
+    if not text:
+        return None
+    
+    # Try to parse directly first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    
+    # Try to find JSON wrapped in text
+    first_brace = text.find('{')
+    last_brace = text.rfind('}')
+    
+    if first_brace == -1 or last_brace == -1 or first_brace >= last_brace:
+        return None
+    
+    try:
+        json_str = text[first_brace:last_brace + 1]
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        return None
+
+
 def now_iso() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
@@ -2527,7 +2556,20 @@ Be specific and actionable. Use evidence from the HTML and screenshots.
             response_format={"type": "json_object"},
         )
         
-        data = json.loads(response.choices[0].message.content or "{}")
+        content = response.choices[0].message.content or "{}"
+        data = _extract_json_from_text(content)
+        if data is None:
+            print(f"[ANALYZE_PAGE] Failed to extract JSON from response for {page_url}")
+            return {
+                "page_type": page_type,
+                "summary": f"Analysis parsing failed - received non-JSON response",
+                "strengths": [],
+                "leaks": [],
+                "quick_wins": [],
+                "notes": {},
+                "error": "JSON parsing failed",
+            }
+        
         return data
         
     except Exception as e:
@@ -2592,9 +2634,9 @@ def synthesize_deep_scan(page_analyses: List[Dict[str, Any]], clinic_name: str) 
 
 You have analyzed {len(page_analyses)} pages. Your task is to create:
 
-1. **Executive Summary**: 5 key bullet points summarizing the most important findings
-2. **What to Fix First**: The single highest-priority recommendation
-3. **Patient Journey Map**: Map the patient journey across these steps:
+1. **Executive Summary**: EXACTLY 5 key bullet points summarizing the most important findings (REQUIRED - must have 5 bullets)
+2. **What to Fix First**: The single highest-priority recommendation (REQUIRED - must be specific and actionable)
+3. **Patient Journey Map**: Map the patient journey across AT LEAST 3 of these steps (REQUIRED - minimum 3 steps):
    - Land: First impression (home page)
    - Understand: Learning about services
    - Trust: Building confidence (reviews, credentials, proof)
@@ -2603,23 +2645,23 @@ You have analyzed {len(page_analyses)} pages. Your task is to create:
    - Confirm: Follow-through
    
    For each step, identify:
-   - Which pages support this step
-   - Friction points
-   - Recommended fixes
+   - Which pages support this step (at least 1 URL)
+   - Friction points (at least 1 per step)
+   - Recommended fixes (at least 1 per step)
    - Risk level (HIGH/MED/LOW)
 
-4. **Action Plan**: Top 10 priority fixes ranked by impact/effort
+4. **Action Plan**: Top 10 priority fixes ranked by impact/effort (REQUIRED - must have at least {min(10, len(page_analyses) * 2)} items)
    - Each item should reference specific pages
    - Rank 1 = highest priority, 10 = lower priority
 
-5. **90-Day Roadmap**: Break the action plan into 3 phases:
+5. **90-Day Roadmap**: Break the action plan into 3 phases (REQUIRED - must have all 3 phases):
    - Week 1-2: Quick wins and critical fixes
    - Week 3-6: Medium-effort improvements
    - Week 7-12: Longer-term enhancements
 
-6. **Coverage Report**: List scanned pages and any missing recommended page types
+6. **Coverage Report**: List scanned pages and any missing recommended page types (REQUIRED)
 
-Be specific and actionable. Cross-reference pages where relevant.
+IMPORTANT: You MUST provide ALL sections with the minimum requirements specified above. Be specific and actionable. Cross-reference pages where relevant. Do not leave any section empty.
 """
         
         # Try structured output
@@ -2648,7 +2690,24 @@ Be specific and actionable. Cross-reference pages where relevant.
             response_format={"type": "json_object"},
         )
         
-        data = json.loads(response.choices[0].message.content or "{}")
+        content = response.choices[0].message.content or "{}"
+        
+        # Try to extract JSON from the response
+        data = _extract_json_from_text(content)
+        if data is None:
+            # If extraction failed, log and return error
+            print(f"[SYNTHESIZE] Failed to extract JSON from response. Raw content: {content[:500]}")
+            return {
+                "executive_summary": ["Failed to parse AI response - raw text received instead of JSON"],
+                "what_to_fix_first": "Unable to generate recommendation due to parsing error",
+                "journey_map": [],
+                "action_plan": [],
+                "roadmap_90d": [],
+                "coverage": {"scanned_pages": [], "missing_recommended": []},
+                "error": "JSON parsing failed",
+                "raw_response": content[:1000],  # Store truncated raw response for debugging
+            }
+        
         return data
         
     except Exception as e:
@@ -6894,13 +6953,13 @@ function renderExecutiveSummary(summary, whatToFixFirst) {
   const panel = document.getElementById('executiveSummaryPanel');
   const container = document.getElementById('executiveSummaryContent');
   
-  if (!summary || summary.length === 0) {
-    if (panel) panel.style.display = 'none';
-    return;
-  }
-  
   if (panel) panel.style.display = 'block';
   if (!container) return;
+  
+  if (!summary || summary.length === 0) {
+    container.innerHTML = '<p style="color: var(--muted); font-style: italic;">Deep analysis executive summary not generated yet. This section will populate once the deep scan completes.</p>';
+    return;
+  }
   
   let html = '<ul class="summaryBullets">';
   summary.forEach(bullet => {
@@ -6922,13 +6981,13 @@ function renderPageAnalyses(pages) {
   const panel = document.getElementById('pageAnalysesPanel');
   const container = document.getElementById('pageAnalysesList');
   
-  if (!pages || pages.length === 0) {
-    if (panel) panel.style.display = 'none';
-    return;
-  }
-  
   if (panel) panel.style.display = 'block';
   if (!container) return;
+  
+  if (!pages || pages.length === 0) {
+    container.innerHTML = '<p style="color: var(--muted); font-style: italic;">Page-by-page analysis not available yet. This section will populate once the deep scan completes and analyzes each page.</p>';
+    return;
+  }
   
   let html = '';
   pages.forEach((page, idx) => {
@@ -7014,13 +7073,13 @@ function renderJourneyMap(journeySteps) {
   const panel = document.getElementById('journeyMapPanel');
   const container = document.getElementById('journeyMapContent');
   
-  if (!journeySteps || journeySteps.length === 0) {
-    if (panel) panel.style.display = 'none';
-    return;
-  }
-  
   if (panel) panel.style.display = 'block';
   if (!container) return;
+  
+  if (!journeySteps || journeySteps.length === 0) {
+    container.innerHTML = '<p style="color: var(--muted); font-style: italic;">Patient journey map not generated yet. This section will populate once the deep scan completes and maps the patient journey across all pages.</p>';
+    return;
+  }
   
   let html = '<div class="journeySteps">';
   journeySteps.forEach((step, idx) => {
@@ -7065,13 +7124,13 @@ function renderActionPlan(actionItems) {
   const panel = document.getElementById('actionPlanPanel');
   const container = document.getElementById('actionPlanContent');
   
-  if (!actionItems || actionItems.length === 0) {
-    if (panel) panel.style.display = 'none';
-    return;
-  }
-  
   if (panel) panel.style.display = 'block';
   if (!container) return;
+  
+  if (!actionItems || actionItems.length === 0) {
+    container.innerHTML = '<p style="color: var(--muted); font-style: italic;">Action plan not available yet. This section will populate once the deep scan completes and prioritizes all recommended actions.</p>';
+    return;
+  }
   
   // Sort by rank
   const sorted = [...actionItems].sort((a, b) => (a.rank || 99) - (b.rank || 99));
@@ -7101,13 +7160,13 @@ function renderRoadmap(phases) {
   const panel = document.getElementById('roadmapPanel');
   const container = document.getElementById('roadmapContent');
   
-  if (!phases || phases.length === 0) {
-    if (panel) panel.style.display = 'none';
-    return;
-  }
-  
   if (panel) panel.style.display = 'block';
   if (!container) return;
+  
+  if (!phases || phases.length === 0) {
+    container.innerHTML = '<p style="color: var(--muted); font-style: italic;">90-day roadmap not generated yet. This section will populate once the deep scan completes and creates a phased implementation plan.</p>';
+    return;
+  }
   
   let html = '<div class="roadmapPhases">';
   phases.forEach(phase => {
