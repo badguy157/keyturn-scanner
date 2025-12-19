@@ -3136,6 +3136,8 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
         pages_scanned = 0
         
         # Initialize tracking variables for deep mode error handling
+        # These defaults are correct for quick scans (synthesis_succeeded=True, counters=0)
+        # For deep scans, counters are reset when analysis begins
         successful_page_analyses = 0
         failed_page_analyses = 0
         page_errors = []
@@ -3208,7 +3210,8 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
             # Track page count for garbage collection
             pages_processed = 0
             
-            # Reset tracking variables for deep scan (overwrite defaults)
+            # Reset counters for deep scan page analysis tracking
+            # (These track analysis results, not page capture results)
             successful_page_analyses = 0
             failed_page_analyses = 0
             page_errors = []
@@ -3392,7 +3395,9 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                     except Exception as e:
                         print(f"[SCAN] Failed to parse analysis JSON: {e}")
             
-            # Track synthesis success/failure
+            # Prepare synthesis tracking
+            # Set to False before attempting synthesis; will be set to True on success
+            # Defaults to True for non-deep scans (never enters this block)
             synthesis_succeeded = False
             synthesis_error = None
             
