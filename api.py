@@ -199,6 +199,30 @@ WEAK example
 
 app = FastAPI()
 
+# Global exception handler - ensures all 500s return JSON
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Global exception handler that ensures all unhandled exceptions return JSON.
+    
+    This prevents the frontend from receiving HTML error pages when the server
+    encounters an unexpected error, which would break JSON parsing in the polling code.
+    """
+    import traceback
+    
+    # Log the full exception with traceback for debugging
+    print(f"[GLOBAL_EXCEPTION_HANDLER] Unhandled exception: {exc}")
+    print(traceback.format_exc())
+    
+    # Return JSON error response
+    return JSONResponse(
+        status_code=500,
+        content={
+            "status": "error",
+            "error": "Internal Server Error",
+            "detail": str(exc)
+        }
+    )
+
 # Serve screenshots + artifacts at /artifacts/<scan_id>/<file>
 app.mount("/artifacts", StaticFiles(directory=str(ARTIFACTS_DIR)), name="artifacts")
 
@@ -4405,6 +4429,43 @@ def get_scan(scan_id: str):
     return JSONResponse(resp)
 
 
+@app.get("/api/scan/{scan_id}/status")
+def get_scan_status(scan_id: str):
+    """Lightweight endpoint for polling scan status.
+    
+    Returns only essential fields needed for polling:
+    - status: Current scan status
+    - progress_step: Current progress step (if any)
+    - progress_pct: Progress percentage (0-100)
+    - error: Error message (if any)
+    - updated_at: Last update timestamp
+    
+    This endpoint returns tiny responses (~100 bytes) compared to the full
+    /api/scan/{scan_id} endpoint which can be >100KB for deep scans with
+    multiple pages of screenshots and analysis data.
+    """
+    conn = db()
+    row = conn.execute(
+        "SELECT status, progress_step, progress_pct, error, updated_at FROM scans WHERE id=?",
+        (scan_id,)
+    ).fetchone()
+    
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Scan not found")
+    
+    conn.close()
+    
+    resp = {
+        "status": row["status"],
+        "progress_step": row["progress_step"],
+        "progress_pct": row["progress_pct"],
+        "error": row["error"],
+        "updated_at": row["updated_at"],
+    }
+    return JSONResponse(resp)
+
+
 @app.get("/api/scan_debug/{scan_id}")
 def get_scan_debug(scan_id: str):
     """Debug endpoint to check scan progress, status, and recent data.
@@ -6946,18 +7007,52 @@ async function unlockDeepFromReport() {
       body: JSON.stringify({ code })
     });
     
+    // Read response as text for safer parsing
+    const unlockText = await unlockRes.text();
+    
     if (!unlockRes.ok) {
-      const errorData = await unlockRes.json();
-      hint.textContent = errorData.detail || 'Invalid code';
+      // Try to parse error response
+      let errorMsg = 'Invalid code';
+      try {
+        const errorData = JSON.parse(unlockText);
+        errorMsg = errorData.detail || errorMsg;
+      } catch (e) {
+        // Keep default error message if parse fails
+      }
+      hint.textContent = errorMsg;
       hint.style.color = 'rgba(255, 200, 200, .95)';
       return;
     }
     
-    const unlockData = await unlockRes.json();
+    // Parse unlock response
+    let unlockData;
+    try {
+      unlockData = JSON.parse(unlockText);
+    } catch (parseErr) {
+      hint.textContent = 'Failed to parse server response';
+      hint.style.color = 'rgba(255, 200, 200, .95)';
+      return;
+    }
     
     // Get the current scan URL
     const res = await fetch('/api/scan/' + scanId);
-    const data = await res.json();
+    const resText = await res.text();
+    
+    if (!res.ok) {
+      hint.textContent = 'Failed to fetch scan data';
+      hint.style.color = 'rgba(255, 200, 200, .95)';
+      return;
+    }
+    
+    let data;
+    try {
+      data = JSON.parse(resText);
+    } catch (parseErr) {
+      hint.textContent = 'Failed to parse scan data';
+      hint.style.color = 'rgba(255, 200, 200, .95)';
+      return;
+    }
+    
     const scanUrl = data.url || '';
     
     // Redirect to home page with URL prefilled and deep mode unlocked
@@ -7164,195 +7259,266 @@ function renderPageCritiques(critiques) {
 
 async function tick() {
   let shouldContinuePolling = false;
+  let backoffDelay = 1200; // Default poll interval in milliseconds
+  
   try {
-    const res = await fetch('/api/scan/' + scanId);
-    const data = await res.json();
-
-    const st = data.status || "loading";
-    const err = data.error ? (" | " + data.error) : "";
+    // Use lightweight status endpoint for polling (tiny response ~100 bytes)
+    const statusRes = await fetch('/api/scan/' + scanId + '/status');
+    
+    // Read response as text first for safer parsing
+    const statusText = await statusRes.text();
+    
+    // Check if response is OK and JSON
+    if (!statusRes.ok) {
+      // Server returned an error status
+      const errorMsg = `Server error ${statusRes.status}`;
+      console.error('[TICK] HTTP error:', errorMsg, statusText);
+      const statusEl = document.getElementById('status');
+      if (statusEl) {
+        statusEl.textContent = `Status: Error | ${errorMsg}`;
+      }
+      // Stop polling on 404 (scan not found), continue with backoff on other errors
+      if (statusRes.status === 404) {
+        shouldContinuePolling = false;
+        return;
+      }
+      shouldContinuePolling = true;
+      backoffDelay = 5000; // Back off to 5 seconds on error
+      return;
+    }
+    
+    // Check content-type for JSON
+    const contentType = statusRes.headers.get('content-type');
+    if (!contentType || !contentType.includes('application/json')) {
+      console.error('[TICK] Non-JSON response:', contentType, statusText.substring(0, 200));
+      const statusEl = document.getElementById('status');
+      if (statusEl) {
+        statusEl.textContent = 'Status: Error | Server returned non-JSON response';
+      }
+      shouldContinuePolling = false; // Stop polling if server is returning HTML
+      return;
+    }
+    
+    // Parse JSON safely
+    let statusData;
+    try {
+      statusData = JSON.parse(statusText);
+    } catch (parseErr) {
+      console.error('[TICK] JSON parse error:', parseErr, statusText.substring(0, 200));
+      const statusEl = document.getElementById('status');
+      if (statusEl) {
+        statusEl.textContent = 'Status: Error | Failed to parse server response';
+      }
+      shouldContinuePolling = false; // Stop polling on parse errors
+      return;
+    }
+    
+    // Update status display from lightweight response
+    const st = statusData.status || "loading";
+    const err = statusData.error ? (" | " + statusData.error) : "";
     document.getElementById('status').textContent = "Status: " + statusNice(st) + err;
     
-    // Get entitlements and determine if deep scan is unlocked
-    const entitlements = data.entitlements || {};
-    const isDeliverable = entitlements.deep === true;
-    
-    // Get scan mode from evidence metadata (fallback)
-    const ev = data.evidence || {};
-    const scanMetadata = ev.scan_metadata || {};
-    const scanMode = scanMetadata.mode || 'quick';
-    const pagesScanned = scanMetadata.pages_scanned || 1;
-    
-    // Update pages scanned label
-    const pagesScannedLabel = document.getElementById('pagesScannedLabel');
-    if (pagesScannedLabel && pagesScanned > 1) {
-      pagesScannedLabel.textContent = `(${pagesScanned} pages scanned)`;
-      pagesScannedLabel.style.display = 'inline';
-    }
-    
-    // Update scan mode label
-    const scanModeLabel = document.getElementById('scanModeLabel');
-    if (scanModeLabel) {
-      if (scanMode === 'deep' || pagesScanned > 1) {
-        scanModeLabel.textContent = `Deep Scan (${pagesScanned} pages)`;
-        scanModeLabel.style.background = 'linear-gradient(135deg, rgba(124,247,195,.25), rgba(122,162,255,.20))';
-        scanModeLabel.style.borderColor = 'rgba(124,247,195,.40)';
-        scanModeLabel.style.color = 'rgba(124,247,195,.95)';
-      } else {
-        scanModeLabel.textContent = 'Quick Scan';
-      }
-    }
-    
-    // Show/hide UI components based on isDeliverable
-    const deepScanCard = document.getElementById('deepScanCard');
-    const blueprintCard = document.getElementById('blueprintCard');
-    const deepUnlockedBadge = document.getElementById('deepUnlockedBadge');
-    const topBlueprintBtn = document.getElementById('topBlueprintBtn');
-    
-    if (isDeliverable) {
-      // Deep scan is unlocked - hide upsell components
-      if (deepScanCard) deepScanCard.classList.remove('visible');
-      if (blueprintCard) blueprintCard.style.display = 'none';
-      if (deepUnlockedBadge) deepUnlockedBadge.classList.add('visible');
-      if (topBlueprintBtn) topBlueprintBtn.style.display = 'none';
-    } else {
-      // Quick scan - show upsell components
-      if (deepScanCard && scanMode === 'quick') deepScanCard.classList.add('visible');
-      if (blueprintCard) blueprintCard.style.display = 'flex';
-      if (deepUnlockedBadge) deepUnlockedBadge.classList.remove('visible');
-      if (topBlueprintBtn) topBlueprintBtn.style.display = 'inline-flex';
-    }
-
-    const hd = (ev.home_desktop || {});
-    const hm = (ev.home_mobile || {});
-    
-    // Collect all screenshots including additional pages for deep scans
-    let allManifest = [];
-    allManifest = allManifest.concat(hd.screenshot_manifest || []);
-    allManifest = allManifest.concat(hm.screenshot_manifest || []);
-    
-    // Add screenshots from additional pages if in deep mode
-    const additionalPages = ev.additional_pages || [];
-    if (additionalPages.length > 0) {
-      additionalPages.forEach((page, idx) => {
-        const pageNum = idx + 2; // Page 1 is home, so start at 2
-        addPageScreenshots(allManifest, page.desktop, pageNum);
-        addPageScreenshots(allManifest, page.mobile, pageNum);
-      });
-    }
-
-    const fallbackUrls = []
-      .concat(hd.screenshot_urls || [])
-      .concat(hm.screenshot_urls || []);
-
-    renderImages(allManifest, fallbackUrls);
-
-    const errs = []
-      .concat(hd.screenshot_errors || [])
-      .concat(hm.screenshot_errors || []);
-    renderErrors(errs);
-
-    const score = data.score || null;
-    if (score) {
-      const clinic = score.clinic_name || "Patient-Flow Report";
-      document.getElementById("clinicName").textContent = clinic;
-      document.getElementById("clinicNameCrumb").textContent = clinic;
-
-      const url = score.url || data.url || "";
-      const a = document.getElementById("siteUrl");
-      if (url) { a.href = url; a.textContent = url.replace(/^https?:\/\//,""); }
-
-      document.getElementById("band").textContent = score.band || "—";
-      
-      // Update ScoreboardCard
-      const MAX_SCORE = 60;
-      const total60 = score.total_score_60 ?? 0;
-      const score10 = score.patient_flow_score_10 ?? 0;
-      
-      document.getElementById("score10Main").textContent = (score10 === 0 ? "--" : score10);
-      document.getElementById("score60Main").textContent = (total60 === 0 ? "--" : total60);
-      document.getElementById("verdictChip").textContent = score.band || "—";
-      
-      // Update the radial progress ring
-      const ringEl = document.getElementById("scoreRing");
-      if (ringEl) {
-        const progressPct = (total60 / MAX_SCORE) * 100;
-        ringEl.style.setProperty('--progress', progressPct + '%');
-      }
-
-      renderBars(score.scores || {});
-      renderMiniBars(score.scores || {});
-      
-      // Use detailed versions if available (deep scan), otherwise use legacy format
-      if (score.strengths_detailed && score.strengths_detailed.length) {
-        setList("strengths", score.strengths_detailed);
-      } else {
-        setList("strengths", score.strengths || []);
-      }
-      
-      if (score.leaks_detailed && score.leaks_detailed.length) {
-        setList("leaks", score.leaks_detailed);
-      } else {
-        setList("leaks", score.leaks || []);
-      }
-      
-      if (score.quick_wins_detailed && score.quick_wins_detailed.length) {
-        setList("quickWins", score.quick_wins_detailed);
-      } else {
-        setList("quickWins", score.quick_wins || []);
-      }
-      
-      // Render deep scan sections if available
-      if (score.summary) {
-        renderDeepSummary(score.summary);
-      }
-      if (score.pages_scanned) {
-        renderPagesScanned(score.pages_scanned);
-      }
-      if (score.cross_page_patterns) {
-        renderCrossPatterns(score.cross_page_patterns);
-      }
-      if (score.page_critiques) {
-        renderPageCritiques(score.page_critiques);
-      }
-    }
-    
-    // Render deep scan data if this is a deep scan
-    const deepScan = data.deep_scan || null;
-    const isDeepScan = scanMode === 'deep' || (data.entitlements && data.entitlements.deep);
-    
-    if (isDeepScan) {
-      // Always render deep scan sections for deep scans, even if data is missing
-      // This will show fallback messages when data is not yet available
-      
-      // Render executive summary from synthesis
-      const execSummary = deepScan?.synthesis?.executive_summary || null;
-      const whatToFix = deepScan?.synthesis?.what_to_fix_first || null;
-      renderExecutiveSummary(execSummary, whatToFix);
-      
-      // Render page analyses
-      const pages = deepScan?.pages || null;
-      renderPageAnalyses(pages);
-      
-      // Render journey map
-      const journeyMap = deepScan?.synthesis?.journey_map || null;
-      renderJourneyMap(journeyMap);
-      
-      // Render action plan
-      const actionPlan = deepScan?.synthesis?.action_plan || null;
-      renderActionPlan(actionPlan);
-      
-      // Render 90-day roadmap
-      const roadmap = deepScan?.synthesis?.roadmap_90d || null;
-      renderRoadmap(roadmap);
-    }
-
-    if (debug) {
-      document.getElementById('out').textContent = JSON.stringify(score || data, null, 2);
-    }
-
-    // Determine if we should continue polling
+    // Determine if we should continue polling based on status
     if (st === 'queued' || st === 'running' || st === 'scanning' || st === 'scoring') {
       shouldContinuePolling = true;
+    } else {
+      // Scan is done/error/timed_out - fetch full data once and stop polling
+      shouldContinuePolling = false;
+      
+      // Fetch full scan data with all the details
+      const fullRes = await fetch('/api/scan/' + scanId);
+      const fullText = await fullRes.text();
+      
+      if (!fullRes.ok) {
+        console.error('[TICK] Failed to fetch full scan data:', fullRes.status);
+        return;
+      }
+      
+      let data;
+      try {
+        data = JSON.parse(fullText);
+      } catch (parseErr) {
+        console.error('[TICK] Failed to parse full scan data:', parseErr);
+        return;
+      }
+
+      // Get entitlements and determine if deep scan is unlocked
+      const entitlements = data.entitlements || {};
+      const isDeliverable = entitlements.deep === true;
+      
+      // Get scan mode from evidence metadata (fallback)
+      const ev = data.evidence || {};
+      const scanMetadata = ev.scan_metadata || {};
+      const scanMode = scanMetadata.mode || 'quick';
+      const pagesScanned = scanMetadata.pages_scanned || 1;
+      
+      // Update pages scanned label
+      const pagesScannedLabel = document.getElementById('pagesScannedLabel');
+      if (pagesScannedLabel && pagesScanned > 1) {
+        pagesScannedLabel.textContent = `(${pagesScanned} pages scanned)`;
+        pagesScannedLabel.style.display = 'inline';
+      }
+      
+      // Update scan mode label
+      const scanModeLabel = document.getElementById('scanModeLabel');
+      if (scanModeLabel) {
+        if (scanMode === 'deep' || pagesScanned > 1) {
+          scanModeLabel.textContent = `Deep Scan (${pagesScanned} pages)`;
+          scanModeLabel.style.background = 'linear-gradient(135deg, rgba(124,247,195,.25), rgba(122,162,255,.20))';
+          scanModeLabel.style.borderColor = 'rgba(124,247,195,.40)';
+          scanModeLabel.style.color = 'rgba(124,247,195,.95)';
+        } else {
+          scanModeLabel.textContent = 'Quick Scan';
+        }
+      }
+      
+      // Show/hide UI components based on isDeliverable
+      const deepScanCard = document.getElementById('deepScanCard');
+      const blueprintCard = document.getElementById('blueprintCard');
+      const deepUnlockedBadge = document.getElementById('deepUnlockedBadge');
+      const topBlueprintBtn = document.getElementById('topBlueprintBtn');
+      
+      if (isDeliverable) {
+        // Deep scan is unlocked - hide upsell components
+        if (deepScanCard) deepScanCard.classList.remove('visible');
+        if (blueprintCard) blueprintCard.style.display = 'none';
+        if (deepUnlockedBadge) deepUnlockedBadge.classList.add('visible');
+        if (topBlueprintBtn) topBlueprintBtn.style.display = 'none';
+      } else {
+        // Quick scan - show upsell components
+        if (deepScanCard && scanMode === 'quick') deepScanCard.classList.add('visible');
+        if (blueprintCard) blueprintCard.style.display = 'flex';
+        if (deepUnlockedBadge) deepUnlockedBadge.classList.remove('visible');
+        if (topBlueprintBtn) topBlueprintBtn.style.display = 'inline-flex';
+      }
+
+      const hd = (ev.home_desktop || {});
+      const hm = (ev.home_mobile || {});
+      
+      // Collect all screenshots including additional pages for deep scans
+      let allManifest = [];
+      allManifest = allManifest.concat(hd.screenshot_manifest || []);
+      allManifest = allManifest.concat(hm.screenshot_manifest || []);
+      
+      // Add screenshots from additional pages if in deep mode
+      const additionalPages = ev.additional_pages || [];
+      if (additionalPages.length > 0) {
+        additionalPages.forEach((page, idx) => {
+          const pageNum = idx + 2; // Page 1 is home, so start at 2
+          addPageScreenshots(allManifest, page.desktop, pageNum);
+          addPageScreenshots(allManifest, page.mobile, pageNum);
+        });
+      }
+
+      const fallbackUrls = []
+        .concat(hd.screenshot_urls || [])
+        .concat(hm.screenshot_urls || []);
+
+      renderImages(allManifest, fallbackUrls);
+
+      const errs = []
+        .concat(hd.screenshot_errors || [])
+        .concat(hm.screenshot_errors || []);
+      renderErrors(errs);
+
+      const score = data.score || null;
+      if (score) {
+        const clinic = score.clinic_name || "Patient-Flow Report";
+        document.getElementById("clinicName").textContent = clinic;
+        document.getElementById("clinicNameCrumb").textContent = clinic;
+
+        const url = score.url || data.url || "";
+        const a = document.getElementById("siteUrl");
+        if (url) { a.href = url; a.textContent = url.replace(/^https?:\/\//,""); }
+
+        document.getElementById("band").textContent = score.band || "—";
+        
+        // Update ScoreboardCard
+        const MAX_SCORE = 60;
+        const total60 = score.total_score_60 ?? 0;
+        const score10 = score.patient_flow_score_10 ?? 0;
+        
+        document.getElementById("score10Main").textContent = (score10 === 0 ? "--" : score10);
+        document.getElementById("score60Main").textContent = (total60 === 0 ? "--" : total60);
+        document.getElementById("verdictChip").textContent = score.band || "—";
+        
+        // Update the radial progress ring
+        const ringEl = document.getElementById("scoreRing");
+        if (ringEl) {
+          const progressPct = (total60 / MAX_SCORE) * 100;
+          ringEl.style.setProperty('--progress', progressPct + '%');
+        }
+
+        renderBars(score.scores || {});
+        renderMiniBars(score.scores || {});
+        
+        // Use detailed versions if available (deep scan), otherwise use legacy format
+        if (score.strengths_detailed && score.strengths_detailed.length) {
+          setList("strengths", score.strengths_detailed);
+        } else {
+          setList("strengths", score.strengths || []);
+        }
+        
+        if (score.leaks_detailed && score.leaks_detailed.length) {
+          setList("leaks", score.leaks_detailed);
+        } else {
+          setList("leaks", score.leaks || []);
+        }
+        
+        if (score.quick_wins_detailed && score.quick_wins_detailed.length) {
+          setList("quickWins", score.quick_wins_detailed);
+        } else {
+          setList("quickWins", score.quick_wins || []);
+        }
+        
+        // Render deep scan sections if available
+        if (score.summary) {
+          renderDeepSummary(score.summary);
+        }
+        if (score.pages_scanned) {
+          renderPagesScanned(score.pages_scanned);
+        }
+        if (score.cross_page_patterns) {
+          renderCrossPatterns(score.cross_page_patterns);
+        }
+        if (score.page_critiques) {
+          renderPageCritiques(score.page_critiques);
+        }
+      }
+      
+      // Render deep scan data if this is a deep scan
+      const deepScan = data.deep_scan || null;
+      const isDeepScan = scanMode === 'deep' || (data.entitlements && data.entitlements.deep);
+      
+      if (isDeepScan) {
+        // Always render deep scan sections for deep scans, even if data is missing
+        // This will show fallback messages when data is not yet available
+        
+        // Render executive summary from synthesis
+        const execSummary = deepScan?.synthesis?.executive_summary || null;
+        const whatToFix = deepScan?.synthesis?.what_to_fix_first || null;
+        renderExecutiveSummary(execSummary, whatToFix);
+        
+        // Render page analyses
+        const pages = deepScan?.pages || null;
+        renderPageAnalyses(pages);
+        
+        // Render journey map
+        const journeyMap = deepScan?.synthesis?.journey_map || null;
+        renderJourneyMap(journeyMap);
+        
+        // Render action plan
+        const actionPlan = deepScan?.synthesis?.action_plan || null;
+        renderActionPlan(actionPlan);
+        
+        // Render 90-day roadmap
+        const roadmap = deepScan?.synthesis?.roadmap_90d || null;
+        renderRoadmap(roadmap);
+      }
+
+      if (debug) {
+        document.getElementById('out').textContent = JSON.stringify(score || data, null, 2);
+      }
     }
   } catch (error) {
     // Display error message on fetch/parse failures
@@ -7361,12 +7527,13 @@ async function tick() {
     if (statusEl) {
       statusEl.textContent = "Status: Error | " + (error.message || "Network error");
     }
-    // Continue polling even after error (with delay)
+    // Continue polling with backoff on network errors
     shouldContinuePolling = true;
+    backoffDelay = 5000; // Back off to 5 seconds on error
   } finally {
     // Always schedule next tick in finally block so exceptions don't kill polling
     if (shouldContinuePolling) {
-      setTimeout(tick, 1200);
+      setTimeout(tick, backoffDelay);
     }
   }
 }
