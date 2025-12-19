@@ -264,7 +264,7 @@ def db_safe(value: Any) -> Any:
         return json.dumps(value, default=str)
     except (TypeError, ValueError):
         # Fallback: convert to string if JSON serialization fails
-        # This shouldn't happen often since we use default=str, but it's a safety net
+        # This can happen with circular references or other non-serializable edge cases
         print(f"[DB_SAFE] Warning: JSON serialization failed for {type(value).__name__}, using str() fallback")
         return str(value)
 
