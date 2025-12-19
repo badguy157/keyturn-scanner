@@ -103,6 +103,8 @@ SCAN_STATUS_RUNNING = "running"
 SCAN_STATUS_SCORING = "scoring"
 
 # Scan mode defaults
+SCAN_MODE_QUICK = "quick"
+SCAN_MODE_DEEP = "deep"
 DEFAULT_MAX_PAGES_QUICK = 1
 DEFAULT_MAX_PAGES_DEEP = 8
 MAX_PAGES_LIMIT = 50
@@ -2444,6 +2446,12 @@ def get_scan(scan_id: str):
     if not row:
         raise HTTPException(status_code=404, detail="Scan not found")
 
+    # Determine entitlements based on scan mode
+    mode = row["mode"] if row["mode"] else SCAN_MODE_QUICK
+    entitlements = {
+        "deep": mode == SCAN_MODE_DEEP
+    }
+
     resp = {
         "id": row["id"],
         "url": row["url"],
@@ -2454,6 +2462,7 @@ def get_scan(scan_id: str):
         "error": row["error"],
         "score": json.loads(row["score_json"]) if row["score_json"] else None,
         "evidence": json.loads(row["evidence_json"]) if row["evidence_json"] else None,
+        "entitlements": entitlements,
     }
     return JSONResponse(resp)
 
@@ -3482,6 +3491,38 @@ REPORT_HTML_TEMPLATE = """
       display:block;
     }
     
+    /* Deep Scan Unlocked Badge */
+    .deepUnlockedBadge{
+      display:none;
+      flex-direction:column;
+      align-items:center;
+      justify-content:center;
+      padding:20px;
+      border-radius:16px;
+      background:linear-gradient(135deg, rgba(124,247,195,.15), rgba(122,162,255,.10));
+      border:2px solid rgba(124,247,195,.35);
+      text-align:center;
+      gap:8px;
+    }
+    .deepUnlockedBadge.visible{
+      display:flex;
+    }
+    .deepUnlockedBadge .icon{
+      font-size:32px;
+      margin-bottom:4px;
+    }
+    .deepUnlockedBadge .title{
+      font-size:16px;
+      font-weight:800;
+      color:rgba(124,247,195,.95);
+      letter-spacing:-.2px;
+    }
+    .deepUnlockedBadge .subtitle{
+      font-size:13px;
+      color:var(--muted);
+      line-height:1.4;
+    }
+    
     /* Print styles for PDF */
     @media print {
       /* Force white background and black text */
@@ -3494,7 +3535,7 @@ REPORT_HTML_TEMPLATE = """
       .topbar, .modal, #rawWrap, .actions,
       .btn, .btn2, .k-btn, .k-btn--primary,
       button, .copyBtn, .modalClose, .modalNav,
-      .quickWinCheckbox, .blueprintCard, .emailReportSection{
+      .quickWinCheckbox, .blueprintCard, .deepScanCard, .deepUnlockedBadge, .emailReportSection{
         display:none !important;
       }
       
@@ -3506,11 +3547,63 @@ REPORT_HTML_TEMPLATE = """
         border:1px solid #ddd !important;
       }
       
-      /* Prevent page breaks inside cards and important sections */
-      .panel, .scoreboardCard, .scoreCard, .summaryRow,
-      .grid > div, li, .thumb, .barRow, .miniBarRow{
+      /* Main container: block layout for better printing */
+      .wrap{
+        max-width:100% !important;
+        padding:10px !important;
+      }
+      
+      /* Summary row: convert grid to block */
+      .summaryRow{
+        display:block !important;
+        margin-bottom:0 !important;
+      }
+      
+      .summaryRow > .panel{
+        width:100% !important;
+        margin-bottom:15px !important;
         page-break-inside:avoid !important;
         break-inside:avoid !important;
+      }
+      
+      /* Grid layouts: convert to block */
+      .grid{
+        display:block !important;
+      }
+      
+      .grid > div{
+        width:100% !important;
+        margin-bottom:15px !important;
+        page-break-inside:avoid !important;
+        break-inside:avoid !important;
+      }
+      
+      /* Score cards: convert to block */
+      .scoreCards{
+        display:block !important;
+      }
+      
+      .scoreCard{
+        width:100% !important;
+        margin-bottom:15px !important;
+        page-break-inside:avoid !important;
+        break-inside:avoid !important;
+      }
+      
+      /* Prevent page breaks inside cards and important sections */
+      .panel, .scoreboardCard, .thumb, .barRow, .miniBarRow, li{
+        page-break-inside:avoid !important;
+        break-inside:avoid !important;
+      }
+      
+      /* Remove overflow containers that clip content */
+      .wrap, .panel, .scoreboardCard, .screenshotsCard{
+        overflow:visible !important;
+      }
+      
+      /* Remove fixed/sticky positioning */
+      *{
+        position:static !important;
       }
       
       /* Make all text fully readable - high contrast */
@@ -3532,12 +3625,6 @@ REPORT_HTML_TEMPLATE = """
         color-adjust:exact !important;
       }
       
-      /* Optimize layout for print */
-      .wrap{
-        max-width:100% !important;
-        padding:10px !important;
-      }
-      
       /* Ensure images are visible */
       .thumb img, .modalImg{
         display:block !important;
@@ -3554,15 +3641,6 @@ REPORT_HTML_TEMPLATE = """
       .fill, .miniFill, .scoreCardFill{
         background:#4a7bc8 !important;
       }
-      
-      /* Simplify grid layouts for better printing */
-      .grid, .scoreCards{
-        display:block !important;
-      }
-      
-      .grid > div, .scoreCard{
-        margin-bottom:15px !important;
-      }
     }
   </style>
 </head>
@@ -3575,7 +3653,7 @@ REPORT_HTML_TEMPLATE = """
       </div>
       <div class="actions">
         <a class="btn2" href="/">New scan</a>
-        <a class="btn" href="__CTA_URL__" target="_blank" rel="noopener">__CTA_TEXT__</a>
+        <a class="btn" href="__CTA_URL__" target="_blank" rel="noopener" id="topBlueprintBtn">__CTA_TEXT__</a>
       </div>
     </div>
 
@@ -3621,7 +3699,7 @@ REPORT_HTML_TEMPLATE = """
         <div class="miniBars" id="miniScoreBars"></div>
       </div>
       <div class="panel screenshotsCard">
-        <h2>Screenshots</h2>
+        <h2>Screenshots <span id="pagesScannedLabel" style="display:none; font-size:13px; font-weight:600; color:rgba(124,247,195,.85); margin-left:8px;"></span></h2>
         <div class="tabs">
           <button class="tab active" data-tab="desktop">Desktop</button>
           <button class="tab" data-tab="mobile">Mobile</button>
@@ -3653,7 +3731,7 @@ REPORT_HTML_TEMPLATE = """
           <div class="deepScanUnlockHint" id="deepScanUnlockReportHint"></div>
         </div>
       </div>
-      <div class="panel blueprintCard">
+      <div class="panel blueprintCard" id="blueprintCard">
         <h2>Get the Blueprint</h2>
         <div class="blueprintBullets">
           <div class="blueprintBullet">Complete patient-flow audit & roadmap</div>
@@ -3676,6 +3754,11 @@ REPORT_HTML_TEMPLATE = """
             <div class="emailReportHint" id="emailHint"></div>
           </div>
         </div>
+      </div>
+      <div class="panel deepUnlockedBadge" id="deepUnlockedBadge">
+        <div class="icon">🔓</div>
+        <div class="title">Deep Scan Unlocked</div>
+        <div class="subtitle">This report includes analysis of multiple pages across your site</div>
       </div>
     </div>
 
@@ -3928,22 +4011,65 @@ async function downloadPDF() {
     }, 2000);
   } catch (error) {
     console.error('PDF generation failed:', error);
-    btn.textContent = "PDF failed - try browser print";
+    btn.textContent = "Opening print dialog...";
+    
+    try {
+      // Wait for fonts to load
+      await document.fonts.ready;
+      
+      // Wait for all images to load
+      const images = Array.from(document.images);
+      await Promise.all(images.map(img => {
+        if (img.complete) return Promise.resolve();
+        return new Promise((resolve, reject) => {
+          img.addEventListener('load', resolve);
+          // Resolve (not reject) on error to prevent one bad image from blocking the entire print process
+          // This ensures the print dialog still opens even if some images fail to load
+          img.addEventListener('error', resolve);
+          setTimeout(resolve, 5000); // Timeout after 5s to prevent indefinite waiting
+        });
+      }));
+      
+      // Small delay to ensure rendering is complete
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      // Trigger print dialog
+      window.print();
+    } catch (printError) {
+      console.error('Print preparation failed:', printError);
+      window.print(); // Try anyway
+    }
+    
     setTimeout(() => {
       btn.textContent = originalText;
       btn.disabled = false;
-    }, 3000);
-    // Fallback to browser print dialog
-    window.print();
+    }, 1000);
   }
 }
 
 const KEY_LABELS = {
-  "home_desktop_top": "Desktop (top)",
-  "home_mobile_top": "Mobile (top)",
-  "home_mobile_mid": "Mobile (mid)",
-  "home_mobile_bottom": "Mobile (bottom)"
+  "home_desktop_top": "Homepage - Desktop",
+  "home_mobile_top": "Homepage - Mobile (top)",
+  "home_mobile_mid": "Homepage - Mobile (mid)",
+  "home_mobile_bottom": "Homepage - Mobile (bottom)"
 };
+
+// Function to generate label for any page screenshot
+function getScreenshotLabel(key) {
+  // Check if it's in the predefined labels
+  if (KEY_LABELS[key]) return KEY_LABELS[key];
+  
+  // Parse dynamic page keys like "page2_desktop_top", "page3_mobile_top"
+  const match = key.match(/^page(\d+)_(desktop|mobile)_?(.*)$/);
+  if (match) {
+    const pageNum = match[1];
+    const device = match[2].charAt(0).toUpperCase() + match[2].slice(1);
+    const position = match[3] ? ` (${match[3]})` : '';
+    return `Page ${pageNum} - ${device}${position}`;
+  }
+  
+  return key || "Screenshot";
+}
 
 let currentImages = [];
 let currentIndex = 0;
@@ -4208,12 +4334,13 @@ function renderImages(manifest, fallbackUrls) {
     if (seen.has(u)) continue;
     seen.add(u);
     
-    const label = KEY_LABELS[it.key] || (it.key ? it.key : "Screenshot");
+    const label = getScreenshotLabel(it.key);
     const imgData = { url: u, key: it.key, label: label };
     
-    if (it.key && it.key.startsWith('home_desktop')) {
+    // Categorize by device type (check for desktop or mobile in key)
+    if (it.key && (it.key.includes('desktop') || it.key.startsWith('home_desktop'))) {
       desktopImages.push(imgData);
-    } else if (it.key && it.key.startsWith('home_mobile')) {
+    } else if (it.key && (it.key.includes('mobile') || it.key.startsWith('home_mobile'))) {
       mobileImages.push(imgData);
     }
   }
@@ -4439,6 +4566,17 @@ async function unlockDeepFromReport() {
   }
 }
 
+// Helper function to add screenshots from a page to the manifest
+function addPageScreenshots(manifest, screenshots, pageNum) {
+  if (!screenshots || !screenshots.screenshot_manifest) return;
+  screenshots.screenshot_manifest.forEach(item => {
+    manifest.push({
+      ...item,
+      key: item.key.replace('home_', `page${pageNum}_`)
+    });
+  });
+}
+
 async function tick() {
   const res = await fetch('/api/scan/' + scanId);
   const data = await res.json();
@@ -4447,33 +4585,66 @@ async function tick() {
   const err = data.error ? (" | " + data.error) : "";
   document.getElementById('status').textContent = "Status: " + statusNice(st) + err;
   
-  // Get scan mode from evidence metadata
+  // Get entitlements and determine if deep scan is unlocked
+  const entitlements = data.entitlements || {};
+  const isDeliverable = entitlements.deep === true;
+  
+  // Get scan mode from evidence metadata (fallback)
   const ev = data.evidence || {};
   const scanMetadata = ev.scan_metadata || {};
   const scanMode = scanMetadata.mode || 'quick';
+  const pagesScanned = scanMetadata.pages_scanned || 1;
   
-  // Show/hide deep scan card based on mode
+  // Update pages scanned label
+  const pagesScannedLabel = document.getElementById('pagesScannedLabel');
+  if (pagesScannedLabel && pagesScanned > 1) {
+    pagesScannedLabel.textContent = `(${pagesScanned} pages scanned)`;
+    pagesScannedLabel.style.display = 'inline';
+  }
+  
+  // Show/hide UI components based on isDeliverable
   const deepScanCard = document.getElementById('deepScanCard');
-  if (deepScanCard) {
-    if (scanMode === 'quick') {
-      deepScanCard.classList.add('visible');
-    } else {
-      deepScanCard.classList.remove('visible');
-    }
+  const blueprintCard = document.getElementById('blueprintCard');
+  const deepUnlockedBadge = document.getElementById('deepUnlockedBadge');
+  const topBlueprintBtn = document.getElementById('topBlueprintBtn');
+  
+  if (isDeliverable) {
+    // Deep scan is unlocked - hide upsell components
+    if (deepScanCard) deepScanCard.classList.remove('visible');
+    if (blueprintCard) blueprintCard.style.display = 'none';
+    if (deepUnlockedBadge) deepUnlockedBadge.classList.add('visible');
+    if (topBlueprintBtn) topBlueprintBtn.style.display = 'none';
+  } else {
+    // Quick scan - show upsell components
+    if (deepScanCard && scanMode === 'quick') deepScanCard.classList.add('visible');
+    if (blueprintCard) blueprintCard.style.display = 'flex';
+    if (deepUnlockedBadge) deepUnlockedBadge.classList.remove('visible');
+    if (topBlueprintBtn) topBlueprintBtn.style.display = 'inline-flex';
   }
 
   const hd = (ev.home_desktop || {});
   const hm = (ev.home_mobile || {});
-
-  const manifest = []
-    .concat(hd.screenshot_manifest || [])
-    .concat(hm.screenshot_manifest || []);
+  
+  // Collect all screenshots including additional pages for deep scans
+  let allManifest = [];
+  allManifest = allManifest.concat(hd.screenshot_manifest || []);
+  allManifest = allManifest.concat(hm.screenshot_manifest || []);
+  
+  // Add screenshots from additional pages if in deep mode
+  const additionalPages = ev.additional_pages || [];
+  if (additionalPages.length > 0) {
+    additionalPages.forEach((page, idx) => {
+      const pageNum = idx + 2; // Page 1 is home, so start at 2
+      addPageScreenshots(allManifest, page.desktop, pageNum);
+      addPageScreenshots(allManifest, page.mobile, pageNum);
+    });
+  }
 
   const fallbackUrls = []
     .concat(hd.screenshot_urls || [])
     .concat(hm.screenshot_urls || []);
 
-  renderImages(manifest, fallbackUrls);
+  renderImages(allManifest, fallbackUrls);
 
   const errs = []
     .concat(hd.screenshot_errors || [])
