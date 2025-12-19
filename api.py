@@ -6894,33 +6894,34 @@ async function tick() {
       }
     }
     
-    // Render deep scan data if available
+    // Render deep scan data if this is a deep scan
     const deepScan = data.deep_scan || null;
-    if (deepScan) {
+    const isDeepScan = scanMode === 'deep' || (data.entitlements && data.entitlements.deep);
+    
+    if (isDeepScan) {
+      // Always render deep scan sections for deep scans, even if data is missing
+      // This will show fallback messages when data is not yet available
+      
       // Render executive summary from synthesis
-      if (deepScan.synthesis && deepScan.synthesis.executive_summary) {
-        renderExecutiveSummary(deepScan.synthesis.executive_summary, deepScan.synthesis.what_to_fix_first);
-      }
+      const execSummary = deepScan?.synthesis?.executive_summary || null;
+      const whatToFix = deepScan?.synthesis?.what_to_fix_first || null;
+      renderExecutiveSummary(execSummary, whatToFix);
       
       // Render page analyses
-      if (deepScan.pages && deepScan.pages.length > 0) {
-        renderPageAnalyses(deepScan.pages);
-      }
+      const pages = deepScan?.pages || null;
+      renderPageAnalyses(pages);
       
       // Render journey map
-      if (deepScan.synthesis && deepScan.synthesis.journey_map) {
-        renderJourneyMap(deepScan.synthesis.journey_map);
-      }
+      const journeyMap = deepScan?.synthesis?.journey_map || null;
+      renderJourneyMap(journeyMap);
       
       // Render action plan
-      if (deepScan.synthesis && deepScan.synthesis.action_plan) {
-        renderActionPlan(deepScan.synthesis.action_plan);
-      }
+      const actionPlan = deepScan?.synthesis?.action_plan || null;
+      renderActionPlan(actionPlan);
       
       // Render 90-day roadmap
-      if (deepScan.synthesis && deepScan.synthesis.roadmap_90d) {
-        renderRoadmap(deepScan.synthesis.roadmap_90d);
-      }
+      const roadmap = deepScan?.synthesis?.roadmap_90d || null;
+      renderRoadmap(roadmap);
     }
 
     if (debug) {
