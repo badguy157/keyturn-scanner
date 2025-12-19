@@ -360,7 +360,7 @@ def maybe_json(v):
         if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
             try:
                 return json.loads(s)
-            except:
+            except (json.JSONDecodeError, ValueError):
                 return v
     return v
 
