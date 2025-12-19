@@ -4096,8 +4096,14 @@ async function unlockDeep(event) {
     });
     
     if (!res.ok) {
-      const errorData = await res.json();
-      hint.textContent = errorData.detail || 'Invalid code';
+      const contentType = res.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        const errorData = await res.json();
+        hint.textContent = errorData.detail || 'Invalid code';
+      } else {
+        const errorText = await res.text();
+        hint.textContent = errorText.substring(0, 50) || 'Invalid code';
+      }
       hint.style.color = 'rgba(255, 200, 200, .95)';
       return;
     }
@@ -7085,13 +7091,27 @@ async function unlockDeepFromReport() {
     if (!unlockRes.ok) {
       // Try to parse error response
       let errorMsg = 'Invalid code';
-      try {
-        const errorData = JSON.parse(unlockText);
-        errorMsg = errorData.detail || errorMsg;
-      } catch (e) {
-        // Keep default error message if parse fails
+      const contentType = unlockRes.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        try {
+          const errorData = JSON.parse(unlockText);
+          errorMsg = errorData.detail || errorMsg;
+        } catch (e) {
+          // Keep default error message if parse fails
+        }
+      } else {
+        // Non-JSON error - use text directly (truncated)
+        errorMsg = unlockText.substring(0, 50) || errorMsg;
       }
       hint.textContent = errorMsg;
+      hint.style.color = 'rgba(255, 200, 200, .95)';
+      return;
+    }
+    
+    // Check content-type for successful response
+    const contentType = unlockRes.headers.get('content-type');
+    if (!contentType || !contentType.includes('application/json')) {
+      hint.textContent = 'Server returned non-JSON response';
       hint.style.color = 'rgba(255, 200, 200, .95)';
       return;
     }
@@ -7402,7 +7422,22 @@ async function tick() {
       const fullText = await fullRes.text();
       
       if (!fullRes.ok) {
-        console.error('[TICK] Failed to fetch full scan data:', fullRes.status);
+        console.error('[TICK] Failed to fetch full scan data:', fullRes.status, fullText.substring(0, 200));
+        const statusEl = document.getElementById('status');
+        if (statusEl) {
+          statusEl.textContent = `Status: Error | Server returned ${fullRes.status}: ${fullText.substring(0, 100)}`;
+        }
+        return;
+      }
+      
+      // Check content-type for JSON
+      const fullContentType = fullRes.headers.get('content-type');
+      if (!fullContentType || !fullContentType.includes('application/json')) {
+        console.error('[TICK] Non-JSON response for full scan data:', fullContentType, fullText.substring(0, 200));
+        const statusEl = document.getElementById('status');
+        if (statusEl) {
+          statusEl.textContent = 'Status: Error | Server returned non-JSON response: ' + fullText.substring(0, 100);
+        }
         return;
       }
       
@@ -7410,7 +7445,11 @@ async function tick() {
       try {
         data = JSON.parse(fullText);
       } catch (parseErr) {
-        console.error('[TICK] Failed to parse full scan data:', parseErr);
+        console.error('[TICK] Failed to parse full scan data:', parseErr, fullText.substring(0, 200));
+        const statusEl = document.getElementById('status');
+        if (statusEl) {
+          statusEl.textContent = 'Status: Error | Failed to parse response: ' + fullText.substring(0, 100);
+        }
         return;
       }
 
