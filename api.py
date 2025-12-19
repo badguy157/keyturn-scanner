@@ -450,6 +450,77 @@ class DeepScanSummary(BaseModel):
     top_3_fixes: List[str] = Field(..., description="Top 3 recommended fixes in priority order")
 
 
+# New models for deep scan per-page analysis
+class PageQuickWin(BaseModel):
+    title: str = Field(..., description="Quick win title")
+    why: str = Field(..., description="Why this matters")
+    how: str = Field(..., description="How to fix it")
+    impact: Literal["HIGH", "MED", "LOW"] = Field(..., description="Impact level")
+    effort: Literal["LOW", "MED", "HIGH"] = Field(..., description="Effort level")
+
+
+class PageNotes(BaseModel):
+    cta: Optional[str] = Field(default=None, description="CTA/booking path notes")
+    trust: Optional[str] = Field(default=None, description="Trust signals notes")
+    mobile: Optional[str] = Field(default=None, description="Mobile experience notes")
+    speed: Optional[str] = Field(default=None, description="Page speed notes")
+    proof: Optional[str] = Field(default=None, description="Proof/social proof notes")
+    copy: Optional[str] = Field(default=None, description="Copy/messaging notes")
+
+
+class PageAnalysis(BaseModel):
+    page_type: str = Field(..., description="Page type classification")
+    summary: str = Field(..., description="Brief summary of this page")
+    strengths: List[str] = Field(default_factory=list, description="What's working well")
+    leaks: List[str] = Field(default_factory=list, description="Booking leaks on this page")
+    quick_wins: List[PageQuickWin] = Field(default_factory=list, description="Quick wins for this page")
+    notes: PageNotes = Field(default_factory=PageNotes, description="Category-specific notes")
+
+
+# Models for final synthesis
+class JourneyStep(BaseModel):
+    step: str = Field(..., description="Journey step name (e.g., 'Land', 'Understand', 'Trust', 'Choose', 'Commit', 'Confirm')")
+    pages: List[str] = Field(..., description="URLs of pages in this step")
+    friction: List[str] = Field(..., description="Friction points in this step")
+    fixes: List[str] = Field(..., description="Recommended fixes for this step")
+    risk: Literal["HIGH", "MED", "LOW"] = Field(..., description="Risk level if not addressed")
+
+
+class ActionItem(BaseModel):
+    title: str = Field(..., description="Action item title")
+    description: str = Field(..., description="Detailed description")
+    impact: Literal["HIGH", "MED", "LOW"] = Field(..., description="Impact level")
+    effort: Literal["LOW", "MED", "HIGH"] = Field(..., description="Effort level")
+    page_references: List[str] = Field(default_factory=list, description="URLs where this appears")
+    rank: int = Field(..., description="Priority rank (1-10)")
+
+
+class RoadmapPhase(BaseModel):
+    phase: str = Field(..., description="Phase name (e.g., 'Week 1-2', 'Week 3-6', 'Week 7-12')")
+    focus: str = Field(..., description="Main focus for this phase")
+    tasks: List[str] = Field(..., description="Specific tasks for this phase")
+
+
+class CoverageReport(BaseModel):
+    scanned_pages: List[Dict[str, str]] = Field(..., description="List of scanned pages with type and URL")
+    missing_recommended: List[str] = Field(default_factory=list, description="Recommended page types that weren't found")
+
+
+class DeepScanSynthesis(BaseModel):
+    executive_summary: List[str] = Field(..., description="5 key findings bullets")
+    what_to_fix_first: str = Field(..., description="Top priority fix recommendation")
+    journey_map: List[JourneyStep] = Field(..., description="Patient journey map with friction points")
+    action_plan: List[ActionItem] = Field(..., description="Top 10 action items ranked by impact/effort")
+    roadmap_90d: List[RoadmapPhase] = Field(..., description="90-day implementation roadmap")
+    coverage: CoverageReport = Field(..., description="Page coverage report")
+
+
+class DeepScanSummary(BaseModel):
+    executive_summary: List[str] = Field(..., description="3-6 bullet points summarizing key findings")
+    biggest_booking_leak: str = Field(..., description="The single biggest issue causing lost bookings")
+    top_3_fixes: List[str] = Field(..., description="Top 3 recommended fixes in priority order")
+
+
 class PatientFlowAIOutput(BaseModel):
     clinic_name: str = Field(..., description="Clinic name inferred from the site")
     scores: PatientFlowScores
@@ -1255,6 +1326,192 @@ def infer_clinic_name(home_title: str, home_h1: str, url: str) -> str:
     return urlparse(url).netloc.replace("www.", "")
 
 
+def trim_html_for_ai(html: str, max_chars: int = 8000) -> str:
+    """Trim HTML to avoid token blowups in AI analysis.
+    
+    Strips scripts, styles, and comments while keeping:
+    - Headings (h1-h6)
+    - Navigation elements
+    - Buttons and links
+    - Forms and inputs
+    - Visible text content
+    
+    Args:
+        html: Raw HTML content
+        max_chars: Maximum characters to return
+    
+    Returns:
+        Trimmed HTML string
+    """
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Remove script, style, and comment tags
+        for tag in soup(["script", "style", "noscript", "iframe", "svg"]):
+            tag.decompose()
+        
+        # Remove comments
+        for comment in soup.findAll(text=lambda text: isinstance(text, str) and text.strip().startswith("<!--")):
+            comment.extract()
+        
+        # Keep important elements
+        important_tags = ["h1", "h2", "h3", "h4", "h5", "h6", "nav", "header", "footer", "button", "a", "form", "input", "select", "textarea", "p", "li", "span", "div"]
+        
+        # Build trimmed HTML by extracting key elements
+        parts = []
+        
+        # Add title if present
+        if soup.title:
+            parts.append(f"<title>{soup.title.get_text(strip=True)}</title>")
+        
+        # Add main headings
+        for h in soup.find_all(["h1", "h2", "h3"]):
+            text = h.get_text(" ", strip=True)
+            if text:
+                parts.append(f"<{h.name}>{text}</{h.name}>")
+        
+        # Add nav elements
+        for nav in soup.find_all("nav"):
+            links = [a.get_text(strip=True) for a in nav.find_all("a") if a.get_text(strip=True)]
+            if links:
+                parts.append(f"<nav>{', '.join(links[:15])}</nav>")
+        
+        # Add buttons and CTAs
+        for btn in soup.find_all(["button", "a"]):
+            text = btn.get_text(strip=True)
+            href = btn.get("href", "")
+            if text and (CTA_RE.search(text) or href):
+                if href:
+                    parts.append(f"<a href='{href[:100]}'>{text[:100]}</a>")
+                else:
+                    parts.append(f"<button>{text[:100]}</button>")
+        
+        # Add form elements
+        for form in soup.find_all("form"):
+            inputs = form.find_all(["input", "select", "textarea", "button"])
+            if inputs:
+                input_summary = [f"{inp.name}:{inp.get('type', 'text')}" for inp in inputs[:10]]
+                parts.append(f"<form>{', '.join(input_summary)}</form>")
+        
+        # Add some body text
+        body_text = soup.get_text(" ", strip=True)
+        body_text = re.sub(r'\s+', ' ', body_text)
+        if body_text:
+            parts.append(f"<body>{body_text[:2000]}</body>")
+        
+        # Join and trim to max_chars
+        trimmed = "\n".join(parts)
+        if len(trimmed) > max_chars:
+            trimmed = trimmed[:max_chars] + "..."
+        
+        return trimmed
+    except Exception as e:
+        # Fallback: just return truncated text
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+            text = soup.get_text(" ", strip=True)
+            text = re.sub(r'\s+', ' ', text)
+            return text[:max_chars]
+        except Exception:
+            return html[:max_chars]
+
+
+def extract_page_signals(url: str, html: str, page_type: str) -> Dict[str, Any]:
+    """Extract key signals from a page for AI analysis.
+    
+    Args:
+        url: Page URL
+        html: Raw HTML content
+        page_type: Classified page type
+    
+    Returns:
+        Dict containing extracted signals
+    """
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Basic metadata
+        title = (soup.title.get_text(" ", strip=True) if soup.title else "")[:200]
+        h1 = (soup.find("h1").get_text(" ", strip=True) if soup.find("h1") else "")[:200]
+        h2_list = [h.get_text(" ", strip=True)[:100] for h in soup.find_all("h2")[:5]]
+        
+        # Navigation
+        nav_labels = []
+        for nav in soup.find_all("nav"):
+            for a in nav.find_all("a"):
+                text = a.get_text(strip=True)
+                if text:
+                    nav_labels.append(text[:50])
+        nav_labels = nav_labels[:20]
+        
+        # CTAs
+        cta_buttons = []
+        for elem in soup.find_all(["button", "a"]):
+            text = elem.get_text(strip=True)
+            if text and CTA_RE.search(text):
+                cta_buttons.append({
+                    "text": text[:100],
+                    "href": elem.get("href", "")[:200] if elem.name == "a" else None
+                })
+        cta_buttons = cta_buttons[:10]
+        
+        # Phone/email presence
+        tel_links = [a.get("href")[:50] for a in soup.find_all("a", href=re.compile(r"^tel:", re.I))][:5]
+        mailto_links = [a.get("href")[:50] for a in soup.find_all("a", href=re.compile(r"^mailto:", re.I))][:5]
+        
+        # Forms
+        forms = soup.find_all("form")
+        form_fields = []
+        for form in forms[:3]:
+            fields = []
+            for inp in form.find_all(["input", "select", "textarea"]):
+                field_type = inp.get("type", "text") if inp.name == "input" else inp.name
+                field_name = inp.get("name", inp.get("id", ""))
+                if field_name or field_type:
+                    fields.append(f"{field_name}:{field_type}")
+            if fields:
+                form_fields.append(fields[:15])
+        
+        # Proof elements
+        has_before_after = bool(BEFORE_AFTER_RE.search(soup.get_text()))
+        has_reviews = bool(re.search(r"review|testimonial", soup.get_text(), re.I))
+        has_credentials = bool(MD_RE.search(soup.get_text()) or DR_RE.search(soup.get_text()))
+        
+        # Image count
+        img_count = len(soup.find_all("img"))
+        
+        # Visible text sample
+        text = soup.get_text(" ", strip=True)
+        text = re.sub(r'\s+', ' ', text)
+        text_sample = text[:1500]
+        
+        return {
+            "url": url,
+            "page_type": page_type,
+            "title": title,
+            "h1": h1,
+            "h2_list": h2_list,
+            "nav_labels": nav_labels,
+            "cta_buttons": cta_buttons,
+            "tel_links": tel_links,
+            "mailto_links": mailto_links,
+            "form_count": len(forms),
+            "form_fields": form_fields,
+            "has_before_after": has_before_after,
+            "has_reviews": has_reviews,
+            "has_credentials": has_credentials,
+            "img_count": img_count,
+            "text_sample": text_sample,
+        }
+    except Exception as e:
+        print(f"[SIGNALS] Error extracting signals from {url}: {e}")
+        return {
+            "url": url,
+            "page_type": page_type,
+            "error": str(e),
+        }
+
+
 def extract_evidence_from_html(url: str, html: str) -> Dict[str, Any]:
     soup = BeautifulSoup(html, "html.parser")
 
@@ -2050,6 +2307,249 @@ def capture_page(url: str, scan_dir: Path, page_index: int = 0) -> Dict[str, Any
         "desktop": desktop_data,
         "mobile": mobile_data,
     }
+
+
+def analyze_single_page(
+    page_url: str,
+    page_type: str,
+    html_content: str,
+    screenshot_desktop: Optional[str] = None,
+    screenshot_mobile: Optional[str] = None,
+    signals: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Analyze a single page using AI to extract strengths, leaks, and quick wins.
+    
+    Args:
+        page_url: URL of the page
+        page_type: Classified page type
+        html_content: Raw HTML (will be trimmed)
+        screenshot_desktop: Path to desktop screenshot
+        screenshot_mobile: Path to mobile screenshot
+        signals: Pre-extracted signals (CTAs, forms, etc.)
+    
+    Returns:
+        Analysis dict conforming to PageAnalysis schema
+    """
+    ok, msg = _ai_ready()
+    if not ok:
+        return {
+            "page_type": page_type,
+            "summary": f"AI analysis unavailable: {msg}",
+            "strengths": [],
+            "leaks": [],
+            "quick_wins": [],
+            "notes": {},
+            "error": msg,
+        }
+    
+    try:
+        client = OpenAI()  # type: ignore
+        
+        # Trim HTML to avoid token blowups
+        trimmed_html = trim_html_for_ai(html_content, max_chars=6000)
+        
+        # Build prompt
+        sys_prompt = f"""You are analyzing a single page from a clinic website. Your task is to identify:
+1. What's working well (strengths)
+2. What's causing booking leaks (friction points)
+3. Quick wins (high-impact, low-effort fixes)
+
+Page type: {page_type}
+
+Focus areas by page type:
+- home: First impression, clarity, primary CTA visibility
+- booking_consult: Form simplicity, trust signals before form, mobile usability
+- services_index: Organization, navigation, outcome framing
+- service_detail: Specific treatment clarity, pricing hints, before/after proof, CTA placement
+- results_gallery: Image quality, organization, outcome messaging
+- reviews: Authenticity, recency, diversity, prominence
+- pricing_financing: Transparency, payment options, value framing
+- about_doctor: Credentials, approachability, trust building
+- contact_locations: Easy to find info, maps, hours, multi-location clarity
+
+Be specific and actionable. Use evidence from the HTML and screenshots.
+"""
+        
+        # Build input
+        content: List[Dict[str, Any]] = [
+            {
+                "type": "input_text",
+                "text": f"URL: {page_url}\n\nPage Type: {page_type}\n\nSignals: {json.dumps(signals, indent=2)}\n\nHTML (trimmed):\n{trimmed_html}",
+            }
+        ]
+        
+        # Add screenshots if available
+        if screenshot_desktop:
+            img = _img_to_data_url(screenshot_desktop)
+            if img:
+                content.append({"type": "input_image", "image_url": img})
+        
+        if screenshot_mobile:
+            img = _img_to_data_url(screenshot_mobile)
+            if img:
+                content.append({"type": "input_image", "image_url": img})
+        
+        # Try structured output first (Responses API)
+        try:
+            if hasattr(client, "responses") and hasattr(client.responses, "parse"):
+                response = client.responses.parse(
+                    model=OPENAI_MODEL_FALLBACKS[0],
+                    messages=[
+                        {"role": "system", "content": [{"type": "text", "text": sys_prompt}]},
+                        {"role": "user", "content": content},
+                    ],
+                    response_format=PageAnalysis,
+                )
+                data = _model_to_dict(response.parsed)
+                return data
+        except Exception as e:
+            print(f"[ANALYZE_PAGE] Structured output failed, falling back to JSON mode: {e}")
+        
+        # Fallback to JSON mode
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL_FALLBACKS[0],
+            messages=[
+                {"role": "system", "content": sys_prompt + "\n\nReturn output as JSON conforming to the PageAnalysis schema."},
+                {"role": "user", "content": json.dumps({"url": page_url, "signals": signals, "html": trimmed_html[:3000]})},
+            ],
+            response_format={"type": "json_object"},
+        )
+        
+        data = json.loads(response.choices[0].message.content or "{}")
+        return data
+        
+    except Exception as e:
+        print(f"[ANALYZE_PAGE] Error analyzing {page_url}: {e}")
+        return {
+            "page_type": page_type,
+            "summary": f"Analysis failed: {str(e)}",
+            "strengths": [],
+            "leaks": [],
+            "quick_wins": [],
+            "notes": {},
+            "error": str(e),
+        }
+
+
+def synthesize_deep_scan(page_analyses: List[Dict[str, Any]], clinic_name: str) -> Dict[str, Any]:
+    """Synthesize final deep scan report from individual page analyses.
+    
+    Args:
+        page_analyses: List of page analysis dicts (from analyze_single_page)
+        clinic_name: Name of the clinic
+    
+    Returns:
+        Synthesis dict conforming to DeepScanSynthesis schema
+    """
+    ok, msg = _ai_ready()
+    if not ok:
+        print(f"[SYNTHESIZE] AI unavailable: {msg}")
+        return {
+            "executive_summary": ["Deep scan synthesis unavailable - AI service not configured"],
+            "what_to_fix_first": "Configure AI service to enable synthesis",
+            "journey_map": [],
+            "action_plan": [],
+            "roadmap_90d": [],
+            "coverage": {"scanned_pages": [], "missing_recommended": []},
+            "error": msg,
+        }
+    
+    try:
+        client = OpenAI()  # type: ignore
+        
+        # Build summary of page analyses
+        pages_summary = []
+        for i, analysis in enumerate(page_analyses):
+            page_summary = {
+                "index": i + 1,
+                "url": analysis.get("url", "unknown"),
+                "page_type": analysis.get("page_type", "unknown"),
+                "summary": analysis.get("summary", ""),
+                "strengths_count": len(analysis.get("strengths", [])),
+                "leaks_count": len(analysis.get("leaks", [])),
+                "quick_wins_count": len(analysis.get("quick_wins", [])),
+                "key_findings": {
+                    "top_strength": analysis.get("strengths", [""])[0] if analysis.get("strengths") else "",
+                    "top_leak": analysis.get("leaks", [""])[0] if analysis.get("leaks") else "",
+                    "top_quick_win": analysis.get("quick_wins", [{}])[0].get("title", "") if analysis.get("quick_wins") else "",
+                }
+            }
+            pages_summary.append(page_summary)
+        
+        sys_prompt = f"""You are synthesizing a comprehensive deep scan report for {clinic_name}.
+
+You have analyzed {len(page_analyses)} pages. Your task is to create:
+
+1. **Executive Summary**: 5 key bullet points summarizing the most important findings
+2. **What to Fix First**: The single highest-priority recommendation
+3. **Patient Journey Map**: Map the patient journey across these steps:
+   - Land: First impression (home page)
+   - Understand: Learning about services
+   - Trust: Building confidence (reviews, credentials, proof)
+   - Choose: Treatment selection
+   - Commit: Booking/consultation
+   - Confirm: Follow-through
+   
+   For each step, identify:
+   - Which pages support this step
+   - Friction points
+   - Recommended fixes
+   - Risk level (HIGH/MED/LOW)
+
+4. **Action Plan**: Top 10 priority fixes ranked by impact/effort
+   - Each item should reference specific pages
+   - Rank 1 = highest priority, 10 = lower priority
+
+5. **90-Day Roadmap**: Break the action plan into 3 phases:
+   - Week 1-2: Quick wins and critical fixes
+   - Week 3-6: Medium-effort improvements
+   - Week 7-12: Longer-term enhancements
+
+6. **Coverage Report**: List scanned pages and any missing recommended page types
+
+Be specific and actionable. Cross-reference pages where relevant.
+"""
+        
+        # Try structured output
+        try:
+            if hasattr(client, "responses") and hasattr(client.responses, "parse"):
+                response = client.responses.parse(
+                    model=OPENAI_MODEL_FALLBACKS[0],
+                    messages=[
+                        {"role": "system", "content": [{"type": "text", "text": sys_prompt}]},
+                        {"role": "user", "content": [{"type": "input_text", "text": f"Page Analyses Summary:\n{json.dumps(pages_summary, indent=2)}"}]},
+                    ],
+                    response_format=DeepScanSynthesis,
+                )
+                data = _model_to_dict(response.parsed)
+                return data
+        except Exception as e:
+            print(f"[SYNTHESIZE] Structured output failed, falling back to JSON mode: {e}")
+        
+        # Fallback to JSON mode
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL_FALLBACKS[0],
+            messages=[
+                {"role": "system", "content": sys_prompt + "\n\nReturn output as JSON conforming to the DeepScanSynthesis schema."},
+                {"role": "user", "content": json.dumps({"pages": pages_summary})},
+            ],
+            response_format={"type": "json_object"},
+        )
+        
+        data = json.loads(response.choices[0].message.content or "{}")
+        return data
+        
+    except Exception as e:
+        print(f"[SYNTHESIZE] Error synthesizing deep scan: {e}")
+        return {
+            "executive_summary": [f"Synthesis failed: {str(e)}"],
+            "what_to_fix_first": "Unable to generate recommendation",
+            "journey_map": [],
+            "action_plan": [],
+            "roadmap_90d": [],
+            "coverage": {"scanned_pages": [], "missing_recommended": []},
+            "error": str(e),
+        }
 
 
 def analyze_pages(pages: List[Dict[str, Any]], target_url: str) -> Dict[str, Any]:
