@@ -23,6 +23,7 @@
 #   python -m uvicorn api:app --reload
 
 import base64
+import gc  # For explicit memory management in memory-constrained environments (512MB Render instance)
 import hashlib
 import hmac
 import json
@@ -2020,13 +2021,13 @@ def fetch_page_evidence(
                     page.wait_for_timeout(450)
                     _wait_network_idle(page, 9000)
 
-                page.screenshot(path=str(sp), full_page=False, type="jpeg", quality=72)
+                page.screenshot(path=str(sp), full_page=False, type="jpeg", quality=55)
 
                 # Retry if capture looks suspiciously empty (often white)
                 if sp.exists() and sp.stat().st_size < 35_000:
                     page.wait_for_timeout(1200)
                     _wait_network_idle(page, 9000)
-                    page.screenshot(path=str(sp), full_page=False, type="jpeg", quality=72)
+                    page.screenshot(path=str(sp), full_page=False, type="jpeg", quality=55)
 
                 if sp.exists() and sp.stat().st_size > 12_000:
                     u = _to_artifact_url(sp)
@@ -3169,7 +3170,9 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
         if mode == "deep" and len(captured_pages) > 1:
             print(f"[SCAN] Deep mode: analyzing {len(captured_pages)} pages individually")
             
-            page_analyses = []
+            # Track page count for garbage collection
+            pages_processed = 0
+            
             for i, page_data in enumerate(captured_pages):
                 page_url = page_data.get("url", "")
                 desktop_data = page_data.get("desktop", {})
@@ -3178,7 +3181,7 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                 # Skip if page had errors during capture
                 if desktop_data.get("error") and mobile_data.get("error"):
                     print(f"[SCAN] Skipping analysis for {page_url} (capture failed)")
-                    page_analyses.append({
+                    error_analysis = {
                         "url": page_url,
                         "page_type": "unknown",
                         "summary": "Page capture failed",
@@ -3187,7 +3190,28 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                         "quick_wins": [],
                         "notes": {},
                         "error": desktop_data.get("error"),
-                    })
+                    }
+                    # Store minimal error analysis in database
+                    conn.execute(
+                        """
+                        INSERT INTO scan_pages 
+                        (scan_id, url, title, page_type, is_mobile, screenshot_paths, extracted_signals, analysis, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            scan_id,
+                            page_url,
+                            None,
+                            "unknown",
+                            0,
+                            db_safe({}),
+                            db_safe({}),
+                            db_safe(error_analysis),
+                            now_iso(),
+                        ),
+                    )
+                    conn.commit()
+                    del error_analysis
                     continue
                 
                 try:
@@ -3207,7 +3231,7 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                     # Extract signals
                     signals = extract_page_signals(page_url, html_content, page_type)
                     
-                    # Get screenshot paths
+                    # Get screenshot paths (filenames only, not data)
                     screenshot_desktop = None
                     screenshot_mobile = None
                     if desktop_data.get("screenshot_urls"):
@@ -3230,9 +3254,8 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                     # Touch after analysis completes
                     touch_scan(scan_id)
                     analysis["url"] = page_url  # Ensure URL is set
-                    page_analyses.append(analysis)
                     
-                    # Store page analysis in database
+                    # Store page analysis in database immediately
                     conn.execute(
                         """
                         INSERT INTO scan_pages 
@@ -3256,9 +3279,20 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                     )
                     conn.commit()
                     
+                    # Free memory immediately after storing
+                    del analysis
+                    del html_content
+                    del signals
+                    pages_processed += 1
+                    
+                    # Call garbage collector every 2 pages to free memory aggressively
+                    # This is needed for 512MB memory-constrained environments
+                    if pages_processed % 2 == 0:
+                        gc.collect()
+                    
                 except Exception as page_err:
                     print(f"[SCAN] Error analyzing {page_url}: {page_err}")
-                    page_analyses.append({
+                    error_analysis = {
                         "url": page_url,
                         "page_type": "unknown",
                         "summary": f"Analysis error: {str(page_err)}",
@@ -3267,7 +3301,44 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                         "quick_wins": [],
                         "notes": {},
                         "error": str(page_err),
-                    })
+                    }
+                    # Store error analysis
+                    conn.execute(
+                        """
+                        INSERT INTO scan_pages 
+                        (scan_id, url, title, page_type, is_mobile, screenshot_paths, extracted_signals, analysis, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            scan_id,
+                            page_url,
+                            None,
+                            "unknown",
+                            0,
+                            db_safe({}),
+                            db_safe({}),
+                            db_safe(error_analysis),
+                            now_iso(),
+                        ),
+                    )
+                    conn.commit()
+                    del error_analysis
+            
+            # Retrieve minimal page analysis summaries from database for synthesis
+            print(f"[SCAN] Retrieving page analyses from database for synthesis")
+            page_analyses = []
+            rows = conn.execute(
+                "SELECT analysis FROM scan_pages WHERE scan_id=? ORDER BY id",
+                (scan_id,)
+            ).fetchall()
+            for row in rows:
+                analysis_json = row["analysis"]
+                if analysis_json:
+                    try:
+                        analysis = json.loads(analysis_json)
+                        page_analyses.append(analysis)
+                    except Exception as e:
+                        print(f"[SCAN] Failed to parse analysis JSON: {e}")
             
             # Synthesize deep scan results
             print(f"[SCAN] Synthesizing deep scan results from {len(page_analyses)} page analyses")
@@ -3283,7 +3354,21 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
             # Touch after synthesis completes
             touch_scan(scan_id)
             
-            # Store synthesis in database
+            # Free page_analyses memory before storing synthesis
+            del page_analyses
+            gc.collect()
+            
+            # Create slim synthesis with only required fields
+            synthesis_slim = {
+                "executive_summary": synthesis.get("executive_summary", []),
+                "what_to_fix_first": synthesis.get("what_to_fix_first"),
+                "journey_map": synthesis.get("journey_map", []),
+                "action_plan": synthesis.get("action_plan", []),
+                "roadmap_90d": synthesis.get("roadmap_90d", []),
+                "coverage": synthesis.get("coverage", {}),
+            }
+            
+            # Store slim synthesis in database (no raw_html, screenshots, or page_analyses)
             conn.execute(
                 """
                 INSERT INTO scan_summaries 
@@ -3292,16 +3377,21 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
                 """,
                 (
                     scan_id,
-                    db_safe(synthesis.get("executive_summary", [])),
-                    db_safe(synthesis.get("what_to_fix_first")),
-                    db_safe(synthesis.get("journey_map", [])),
-                    db_safe(synthesis.get("action_plan", [])),
-                    db_safe(synthesis.get("roadmap_90d", [])),
-                    db_safe(synthesis.get("coverage", {})),
+                    db_safe(synthesis_slim.get("executive_summary", [])),
+                    db_safe(synthesis_slim.get("what_to_fix_first")),
+                    db_safe(synthesis_slim.get("journey_map", [])),
+                    db_safe(synthesis_slim.get("action_plan", [])),
+                    db_safe(synthesis_slim.get("roadmap_90d", [])),
+                    db_safe(synthesis_slim.get("coverage", {})),
                     now_iso(),
                 ),
             )
             conn.commit()
+            
+            # Free synthesis memory
+            del synthesis
+            del synthesis_slim
+            gc.collect()
             
             print(f"[SCAN] Deep scan synthesis complete and stored in database")
 
