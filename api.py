@@ -116,6 +116,10 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 # Deep scan configuration
 DEEP_SCAN_TEXT_SAMPLE_LIMIT = 500  # Character limit for text samples in deep scan evidence
 
+# Scoring lifecycle configuration
+SCORING_WATCHDOG_TIMEOUT_SECONDS = 300  # 5 minutes - mark scoring as timed out if no update
+ERROR_MESSAGE_MAX_LENGTH = 5000  # Maximum length for error messages stored in database
+
 # Configure mimetypes for better file type detection
 mimetypes.add_type("image/webp", ".webp")
 
@@ -2048,7 +2052,7 @@ def ai_score_patient_flow(target_url: str, evidence: Dict[str, Any]) -> Dict[str
     if not ok:
         raise RuntimeError(msg)
 
-    # Initialize OpenAI client with timeout (90s connect + 180s total)
+    # Initialize OpenAI client with timeout (90s connect, 180s read, 90s write)
     import httpx
     timeout = httpx.Timeout(90.0, read=180.0, write=90.0, connect=90.0)
     client = OpenAI(timeout=timeout)  # type: ignore
@@ -3009,7 +3013,7 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
         
         conn.execute(
             "UPDATE scans SET status=?, updated_at=?, finished_at=?, error=?, progress_step=? WHERE id=?",
-            (SCAN_STATUS_ERROR, now_iso(), now_iso(), error_details[:5000], "error", scan_id),  # Limit error to 5000 chars
+            (SCAN_STATUS_ERROR, now_iso(), now_iso(), error_details[:ERROR_MESSAGE_MAX_LENGTH], "error", scan_id),
         )
         conn.commit()
     finally:
@@ -3831,8 +3835,8 @@ def get_scan(scan_id: str):
             now = datetime.utcnow()
             age_seconds = (now - updated_at).total_seconds()
             
-            # If scoring has been running for more than 5 minutes (300 seconds), mark as error
-            if age_seconds > 300:
+            # If scoring has been running for more than the configured timeout, mark as error
+            if age_seconds > SCORING_WATCHDOG_TIMEOUT_SECONDS:
                 error_msg = f"Scoring timed out (no update for {int(age_seconds)} seconds)"
                 print(f"[WATCHDOG] Marking scan {scan_id} as timed out: {error_msg}")
                 
