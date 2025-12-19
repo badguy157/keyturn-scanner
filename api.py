@@ -39,7 +39,7 @@ from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urljoin, urlparse
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -324,6 +324,45 @@ def init_db() -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scan_pages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          scan_id TEXT NOT NULL,
+          url TEXT NOT NULL,
+          title TEXT,
+          page_type TEXT,
+          is_mobile INTEGER DEFAULT 0,
+          screenshot_paths TEXT,
+          html_path TEXT,
+          extracted_signals TEXT,
+          analysis TEXT,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY (scan_id) REFERENCES scans(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_scan_pages_scan_id 
+        ON scan_pages(scan_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scan_summaries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          scan_id TEXT NOT NULL UNIQUE,
+          executive_summary TEXT,
+          journey_map TEXT,
+          action_plan TEXT,
+          roadmap_90d TEXT,
+          coverage TEXT,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY (scan_id) REFERENCES scans(id)
+        )
+        """
+    )
     conn.commit()
     conn.close()
     _ensure_columns()
@@ -409,6 +448,71 @@ class DeepScanSummary(BaseModel):
     executive_summary: List[str] = Field(..., description="3-6 bullet points summarizing key findings")
     biggest_booking_leak: str = Field(..., description="The single biggest issue causing lost bookings")
     top_3_fixes: List[str] = Field(..., description="Top 3 recommended fixes in priority order")
+
+
+# New models for deep scan per-page analysis
+class PageQuickWin(BaseModel):
+    title: str = Field(..., description="Quick win title")
+    why: str = Field(..., description="Why this matters")
+    how: str = Field(..., description="How to fix it")
+    impact: Literal["HIGH", "MED", "LOW"] = Field(..., description="Impact level")
+    effort: Literal["LOW", "MED", "HIGH"] = Field(..., description="Effort level")
+
+
+class PageNotes(BaseModel):
+    cta: Optional[str] = Field(default=None, description="CTA/booking path notes")
+    trust: Optional[str] = Field(default=None, description="Trust signals notes")
+    mobile: Optional[str] = Field(default=None, description="Mobile experience notes")
+    speed: Optional[str] = Field(default=None, description="Page speed notes")
+    proof: Optional[str] = Field(default=None, description="Proof/social proof notes")
+    copy_messaging: Optional[str] = Field(default=None, description="Copy/messaging notes", alias="messaging")
+
+
+class PageAnalysis(BaseModel):
+    page_type: str = Field(..., description="Page type classification")
+    summary: str = Field(..., description="Brief summary of this page")
+    strengths: List[str] = Field(default_factory=list, description="What's working well")
+    leaks: List[str] = Field(default_factory=list, description="Booking leaks on this page")
+    quick_wins: List[PageQuickWin] = Field(default_factory=list, description="Quick wins for this page")
+    notes: PageNotes = Field(default_factory=PageNotes, description="Category-specific notes")
+
+
+# Models for final synthesis
+class JourneyStep(BaseModel):
+    step: str = Field(..., description="Journey step name (e.g., 'Land', 'Understand', 'Trust', 'Choose', 'Commit', 'Confirm')")
+    pages: List[str] = Field(..., description="URLs of pages in this step")
+    friction: List[str] = Field(..., description="Friction points in this step")
+    fixes: List[str] = Field(..., description="Recommended fixes for this step")
+    risk: Literal["HIGH", "MED", "LOW"] = Field(..., description="Risk level if not addressed")
+
+
+class ActionItem(BaseModel):
+    title: str = Field(..., description="Action item title")
+    description: str = Field(..., description="Detailed description")
+    impact: Literal["HIGH", "MED", "LOW"] = Field(..., description="Impact level")
+    effort: Literal["LOW", "MED", "HIGH"] = Field(..., description="Effort level")
+    page_references: List[str] = Field(default_factory=list, description="URLs where this appears")
+    rank: int = Field(..., description="Priority rank (1-10)")
+
+
+class RoadmapPhase(BaseModel):
+    phase: str = Field(..., description="Phase name (e.g., 'Week 1-2', 'Week 3-6', 'Week 7-12')")
+    focus: str = Field(..., description="Main focus for this phase")
+    tasks: List[str] = Field(..., description="Specific tasks for this phase")
+
+
+class CoverageReport(BaseModel):
+    scanned_pages: List[Dict[str, str]] = Field(..., description="List of scanned pages with type and URL")
+    missing_recommended: List[str] = Field(default_factory=list, description="Recommended page types that weren't found")
+
+
+class DeepScanSynthesis(BaseModel):
+    executive_summary: List[str] = Field(..., description="5 key findings bullets")
+    what_to_fix_first: str = Field(..., description="Top priority fix recommendation")
+    journey_map: List[JourneyStep] = Field(..., description="Patient journey map with friction points")
+    action_plan: List[ActionItem] = Field(..., description="Top 10 action items ranked by impact/effort")
+    roadmap_90d: List[RoadmapPhase] = Field(..., description="90-day implementation roadmap")
+    coverage: CoverageReport = Field(..., description="Page coverage report")
 
 
 class PatientFlowAIOutput(BaseModel):
@@ -741,14 +845,24 @@ OUTCOME_WORDS = [
     "brighter",
 ]
 
-# Page selection targets for deep scan
-DEEP_SCAN_BOOKING_TARGET = 1  # Always include booking/contact if available
-DEEP_SCAN_SERVICE_MIN = 3  # Minimum service pages
-DEEP_SCAN_SERVICE_RATIO = 0.4  # Service pages as ratio of remaining slots
-DEEP_SCAN_PROOF_TARGET = 1
-DEEP_SCAN_PRICING_TARGET = 1
-DEEP_SCAN_ABOUT_TARGET = 1
-DEEP_SCAN_FAQ_TARGET = 1
+# Page selection targets for deep scan (updated for new funnel page types)
+# Priority order: home, booking_consult, services_index, service_detail, results_gallery, 
+#                 reviews, pricing_financing, about_doctor, contact_locations, form_step
+DEEP_SCAN_TARGETS = {
+    "booking_consult": 1,      # Always include booking if available
+    "services_index": 1,       # Main services page
+    "service_detail": 3,       # Multiple service detail pages (3-5 depending on availability)
+    "results_gallery": 1,      # Before/after gallery
+    "reviews": 1,              # Reviews/testimonials
+    "pricing_financing": 1,    # Pricing page
+    "about_doctor": 1,         # About/doctor page
+    "contact_locations": 1,    # Contact/locations
+    "form_step": 0,            # Don't prioritize form steps (only if discovered)
+}
+
+# Minimum service detail pages to include (important for deep scan quality)
+DEEP_SCAN_SERVICE_MIN = 2
+DEEP_SCAN_SERVICE_MAX = 5
 
 # Regex patterns for identifying page sections
 HEADER_CLASS_RE = re.compile(r"header|nav", re.I)
@@ -812,44 +926,75 @@ def _score_url(url: str) -> int:
     return score
 
 
-def _classify_page_type(url: str, anchor_text: str) -> str:
-    """Classify a page candidate into a type using URL + anchor text heuristics.
+def _classify_page_type(url: str, anchor_text: str, h1_text: str = "") -> str:
+    """Classify a page candidate into a type using URL + anchor text + h1 heuristics.
     
-    Returns one of: booking/contact, service, proof, pricing/financing, about/doctor, faq/location, blog/news, policy, other
+    Returns one of: home, booking_consult, services_index, service_detail, results_gallery, 
+                    reviews, pricing_financing, about_doctor, contact_locations, form_step, other
+    
+    Priority order for deep scan selection:
+    1. home (always included)
+    2. booking_consult
+    3. services_index
+    4. service_detail
+    5. results_gallery
+    6. reviews
+    7. pricing_financing
+    8. about_doctor
+    9. contact_locations
+    10. form_step
     """
     url_lower = url.lower()
     anchor_lower = anchor_text.lower()
-    combined = url_lower + " " + anchor_lower
+    h1_lower = h1_text.lower()
+    combined = url_lower + " " + anchor_lower + " " + h1_lower
     
-    # Booking/Contact (highest priority)
-    if any(k in combined for k in ["book", "appointment", "schedule", "consult", "contact", "call-us", "request"]):
-        return "booking/contact"
+    # Home page (only if it's the root URL)
+    parsed = urlparse(url)
+    if parsed.path in ['/', '', '/index.html', '/index.php', '/home', '/home.html']:
+        return "home"
     
-    # Service pages
-    if any(k in combined for k in ["service", "treatment", "procedure", "injection", "laser", "botox", "filler", "facial", "coolsculpt", "liposuction"]):
-        return "service"
+    # Booking/Consult (highest priority for funnel)
+    if any(k in combined for k in ["book", "appointment", "schedule", "consult", "request-consult", "request-appointment"]):
+        return "booking_consult"
     
-    # Proof (reviews, before/after, gallery, testimonials)
-    if any(k in combined for k in ["review", "testimonial", "before-after", "before-and-after", "gallery", "result", "patient", "case-stud"]):
-        return "proof"
+    # Contact/Locations
+    if any(k in combined for k in ["contact", "location", "find-us", "directions", "office", "visit-us"]):
+        return "contact_locations"
+    
+    # Form step pages (multi-step forms)
+    if any(k in combined for k in ["form", "step-", "checkout", "confirm"]):
+        return "form_step"
+    
+    # Services index (main services listing page)
+    if any(k in combined for k in ["services", "treatments", "procedures"]) and not any(k in combined for k in ["botox", "filler", "laser", "facial", "coolsculpt", "liposuction", "injection"]):
+        return "services_index"
+    
+    # Service detail pages (specific treatment pages)
+    if any(k in combined for k in ["service/", "treatment/", "procedure/", "botox", "filler", "laser", "facial", "coolsculpt", "liposuction", "injection", "skincare"]):
+        return "service_detail"
+    
+    # Results gallery / Before-After
+    if any(k in combined for k in ["before-after", "before-and-after", "gallery", "result", "portfolio", "case-stud"]):
+        return "results_gallery"
+    
+    # Reviews / Testimonials
+    if any(k in combined for k in ["review", "testimonial", "patient-stor", "success-stor"]):
+        return "reviews"
     
     # Pricing/Financing
     if any(k in combined for k in ["pric", "cost", "payment", "financ", "afford", "special", "offer", "promotion"]):
-        return "pricing/financing"
+        return "pricing_financing"
     
     # About/Doctor
-    if any(k in combined for k in ["about", "doctor", "dr-", "dr.", "team", "staff", "physician", "meet-", "our-team", "credentials"]):
-        return "about/doctor"
+    if any(k in combined for k in ["about", "doctor", "dr-", "dr.", "team", "staff", "physician", "meet-", "our-team", "credentials", "bio"]):
+        return "about_doctor"
     
-    # FAQ/Location
-    if any(k in combined for k in ["faq", "question", "location", "direction", "hour", "contact-us", "find-us"]):
-        return "faq/location"
-    
-    # Blog/News (lower priority)
+    # Blog/News (lower priority - not in top 10)
     if any(k in combined for k in ["blog", "news", "article", "post", "media"]):
-        return "blog/news"
+        return "blog"
     
-    # Policy (lowest priority)
+    # Policy (lowest priority - skip)
     if any(k in combined for k in ["privacy", "policy", "term", "legal", "hipaa", "disclaimer"]):
         return "policy"
     
@@ -872,15 +1017,20 @@ def _score_page_candidate(url: str, anchor_text: str, page_type: str, is_cta: bo
     score = 0.0
     
     # Base score by page type (funnel-critical pages score higher)
+    # Priority order matches the problem statement
     type_scores = {
-        "booking/contact": 100,
-        "service": 80,
-        "proof": 70,
-        "pricing/financing": 75,
-        "about/doctor": 65,
-        "faq/location": 50,
+        "home": 100,  # Always selected
+        "booking_consult": 95,
+        "services_index": 85,
+        "service_detail": 80,
+        "results_gallery": 75,
+        "reviews": 75,
+        "pricing_financing": 70,
+        "about_doctor": 65,
+        "contact_locations": 60,
+        "form_step": 55,
         "other": 40,
-        "blog/news": 20,
+        "blog": 20,
         "policy": 10,
     }
     score += type_scores.get(page_type, 30)
@@ -1027,18 +1177,18 @@ def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
         type_counts = {}
         
         # Target mix (out of max_pages - 1, since home is guaranteed)
-        # Adjust these based on max_pages
         remaining_slots = max_pages - 1
         
         # Priority selection strategy using configurable targets
-        targets = {
-            "booking/contact": min(DEEP_SCAN_BOOKING_TARGET, remaining_slots),
-            "service": min(max(DEEP_SCAN_SERVICE_MIN, int(remaining_slots * DEEP_SCAN_SERVICE_RATIO)), remaining_slots),
-            "proof": min(DEEP_SCAN_PROOF_TARGET, remaining_slots),
-            "pricing/financing": min(DEEP_SCAN_PRICING_TARGET, remaining_slots),
-            "about/doctor": min(DEEP_SCAN_ABOUT_TARGET, remaining_slots),
-            "faq/location": min(DEEP_SCAN_FAQ_TARGET, remaining_slots),
-        }
+        # Build targets dict with service_detail having dynamic target based on availability
+        targets = {}
+        for page_type, target in DEEP_SCAN_TARGETS.items():
+            if page_type == "service_detail":
+                # Dynamic service detail target: min 2, max 5, adjusted for remaining slots
+                service_target = min(DEEP_SCAN_SERVICE_MAX, max(DEEP_SCAN_SERVICE_MIN, int(remaining_slots * 0.4)))
+                targets[page_type] = min(service_target, remaining_slots)
+            else:
+                targets[page_type] = min(target, remaining_slots)
         
         # First pass: fill priority types up to targets
         for candidate in candidates:
@@ -1053,8 +1203,8 @@ def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
             current_count = type_counts.get(page_type, 0)
             target_count = targets.get(page_type, 0)
             
-            # Skip blog/news/policy in first pass
-            if page_type in ["blog/news", "policy"]:
+            # Skip blog/policy in first pass
+            if page_type in ["blog", "policy"]:
                 continue
             
             # Add if under target for this type
@@ -1073,14 +1223,14 @@ def discover_site_pages(seed_url: str, max_pages: int) -> List[str]:
             
             page_type = candidate["type"]
             
-            # Still avoid blog/news/policy unless desperate
-            if page_type in ["blog/news", "policy"]:
+            # Still avoid blog/policy unless desperate
+            if page_type in ["blog", "policy"]:
                 continue
             
             selected.append(url)
             type_counts[page_type] = type_counts.get(page_type, 0) + 1
         
-        # Third pass: if still not at max_pages, include blog/news/other (but not policy)
+        # Third pass: if still not at max_pages, include blog/other (but not policy)
         if len(selected) < max_pages:
             for candidate in candidates:
                 if len(selected) >= max_pages:
@@ -1168,6 +1318,196 @@ def infer_clinic_name(home_title: str, home_h1: str, url: str) -> str:
     if 3 <= len(h) <= 80:
         return h
     return urlparse(url).netloc.replace("www.", "")
+
+
+def trim_html_for_ai(html: str, max_chars: int = 8000) -> str:
+    """Trim HTML to avoid token blowups in AI analysis.
+    
+    Strips scripts, styles, and comments while keeping:
+    - Headings (h1-h6)
+    - Navigation elements
+    - Buttons and links
+    - Forms and inputs
+    - Visible text content
+    
+    Args:
+        html: Raw HTML content
+        max_chars: Maximum characters to return
+    
+    Returns:
+        Trimmed HTML string
+    """
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Remove script, style, and other non-content tags
+        for tag in soup(["script", "style", "noscript", "iframe", "svg"]):
+            tag.decompose()
+        
+        # Remove comments (correct BeautifulSoup way)
+        for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
+            comment.extract()
+        
+        # Build trimmed HTML by extracting key elements
+        parts = []
+        
+        # Add title if present
+        if soup.title:
+            parts.append(f"<title>{soup.title.get_text(strip=True)}</title>")
+        
+        # Add main headings
+        for h in soup.find_all(["h1", "h2", "h3"]):
+            text = h.get_text(" ", strip=True)
+            if text:
+                parts.append(f"<{h.name}>{text}</{h.name}>")
+        
+        # Add nav elements
+        for nav in soup.find_all("nav"):
+            links = [a.get_text(strip=True) for a in nav.find_all("a") if a.get_text(strip=True)]
+            if links:
+                parts.append(f"<nav>{', '.join(links[:15])}</nav>")
+        
+        # Add buttons and CTAs
+        for btn in soup.find_all(["button", "a"]):
+            text = btn.get_text(strip=True)
+            href = btn.get("href", "")
+            if text and (CTA_RE.search(text) or href):
+                if href:
+                    parts.append(f"<a href='{href[:100]}'>{text[:100]}</a>")
+                else:
+                    parts.append(f"<button>{text[:100]}</button>")
+        
+        # Add form elements
+        for form in soup.find_all("form"):
+            inputs = form.find_all(["input", "select", "textarea", "button"])
+            if inputs:
+                input_summary = []
+                for inp in inputs[:10]:
+                    field_name = inp.get("name", inp.get("id", ""))
+                    # inp.name is the tag name (e.g., 'input', 'select', 'textarea')
+                    tag_name = inp.name
+                    field_type = inp.get("type", "text") if tag_name == "input" else tag_name
+                    if field_name or field_type:
+                        input_summary.append(f"{field_name}:{field_type}")
+                parts.append(f"<form>{', '.join(input_summary)}</form>")
+        
+        # Add some body text
+        body_text = soup.get_text(" ", strip=True)
+        body_text = re.sub(r'\s+', ' ', body_text)
+        if body_text:
+            parts.append(f"<body>{body_text[:2000]}</body>")
+        
+        # Join and trim to max_chars
+        trimmed = "\n".join(parts)
+        if len(trimmed) > max_chars:
+            trimmed = trimmed[:max_chars] + "..."
+        
+        return trimmed
+    except Exception as e:
+        # Fallback: just return truncated text
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+            text = soup.get_text(" ", strip=True)
+            text = re.sub(r'\s+', ' ', text)
+            return text[:max_chars]
+        except Exception:
+            return html[:max_chars]
+
+
+def extract_page_signals(url: str, html: str, page_type: str) -> Dict[str, Any]:
+    """Extract key signals from a page for AI analysis.
+    
+    Args:
+        url: Page URL
+        html: Raw HTML content
+        page_type: Classified page type
+    
+    Returns:
+        Dict containing extracted signals
+    """
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Basic metadata
+        title = (soup.title.get_text(" ", strip=True) if soup.title else "")[:200]
+        h1 = (soup.find("h1").get_text(" ", strip=True) if soup.find("h1") else "")[:200]
+        h2_list = [h.get_text(" ", strip=True)[:100] for h in soup.find_all("h2")[:5]]
+        
+        # Navigation
+        nav_labels = []
+        for nav in soup.find_all("nav"):
+            for a in nav.find_all("a"):
+                text = a.get_text(strip=True)
+                if text:
+                    nav_labels.append(text[:50])
+        nav_labels = nav_labels[:20]
+        
+        # CTAs
+        cta_buttons = []
+        for elem in soup.find_all(["button", "a"]):
+            text = elem.get_text(strip=True)
+            if text and CTA_RE.search(text):
+                cta_buttons.append({
+                    "text": text[:100],
+                    "href": elem.get("href", "")[:200] if elem.name == "a" else None
+                })
+        cta_buttons = cta_buttons[:10]
+        
+        # Phone/email presence
+        tel_links = [a.get("href")[:50] for a in soup.find_all("a", href=re.compile(r"^tel:", re.I))][:5]
+        mailto_links = [a.get("href")[:50] for a in soup.find_all("a", href=re.compile(r"^mailto:", re.I))][:5]
+        
+        # Forms
+        forms = soup.find_all("form")
+        form_fields = []
+        for form in forms[:3]:
+            fields = []
+            for inp in form.find_all(["input", "select", "textarea"]):
+                field_type = inp.get("type", "text") if inp.name == "input" else inp.name
+                field_name = inp.get("name", inp.get("id", ""))
+                if field_name or field_type:
+                    fields.append(f"{field_name}:{field_type}")
+            if fields:
+                form_fields.append(fields[:15])
+        
+        # Proof elements
+        has_before_after = bool(BEFORE_AFTER_RE.search(soup.get_text()))
+        has_reviews = bool(re.search(r"review|testimonial", soup.get_text(), re.I))
+        has_credentials = bool(MD_RE.search(soup.get_text()) or DR_RE.search(soup.get_text()))
+        
+        # Image count
+        img_count = len(soup.find_all("img"))
+        
+        # Visible text sample
+        text = soup.get_text(" ", strip=True)
+        text = re.sub(r'\s+', ' ', text)
+        text_sample = text[:1500]
+        
+        return {
+            "url": url,
+            "page_type": page_type,
+            "title": title,
+            "h1": h1,
+            "h2_list": h2_list,
+            "nav_labels": nav_labels,
+            "cta_buttons": cta_buttons,
+            "tel_links": tel_links,
+            "mailto_links": mailto_links,
+            "form_count": len(forms),
+            "form_fields": form_fields,
+            "has_before_after": has_before_after,
+            "has_reviews": has_reviews,
+            "has_credentials": has_credentials,
+            "img_count": img_count,
+            "text_sample": text_sample,
+        }
+    except Exception as e:
+        print(f"[SIGNALS] Error extracting signals from {url}: {e}")
+        return {
+            "url": url,
+            "page_type": page_type,
+            "error": str(e),
+        }
 
 
 def extract_evidence_from_html(url: str, html: str) -> Dict[str, Any]:
@@ -1463,6 +1803,7 @@ def fetch_page_evidence(
             evidence["screenshot_urls"] = saved_urls
             evidence["screenshot_manifest"] = screenshot_manifest
             evidence["screenshot_errors"] = screenshot_errors
+            evidence["html_content"] = html  # Store raw HTML for deep scan analysis
             if mobile:
                 evidence["mobile_overflow"] = _detect_mobile_overflow(page)
 
@@ -1967,6 +2308,249 @@ def capture_page(url: str, scan_dir: Path, page_index: int = 0) -> Dict[str, Any
     }
 
 
+def analyze_single_page(
+    page_url: str,
+    page_type: str,
+    html_content: str,
+    screenshot_desktop: Optional[str] = None,
+    screenshot_mobile: Optional[str] = None,
+    signals: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Analyze a single page using AI to extract strengths, leaks, and quick wins.
+    
+    Args:
+        page_url: URL of the page
+        page_type: Classified page type
+        html_content: Raw HTML (will be trimmed)
+        screenshot_desktop: Path to desktop screenshot
+        screenshot_mobile: Path to mobile screenshot
+        signals: Pre-extracted signals (CTAs, forms, etc.)
+    
+    Returns:
+        Analysis dict conforming to PageAnalysis schema
+    """
+    ok, msg = _ai_ready()
+    if not ok:
+        return {
+            "page_type": page_type,
+            "summary": f"AI analysis unavailable: {msg}",
+            "strengths": [],
+            "leaks": [],
+            "quick_wins": [],
+            "notes": {},
+            "error": msg,
+        }
+    
+    try:
+        client = OpenAI()  # type: ignore
+        
+        # Trim HTML to avoid token blowups
+        trimmed_html = trim_html_for_ai(html_content, max_chars=6000)
+        
+        # Build prompt
+        sys_prompt = f"""You are analyzing a single page from a clinic website. Your task is to identify:
+1. What's working well (strengths)
+2. What's causing booking leaks (friction points)
+3. Quick wins (high-impact, low-effort fixes)
+
+Page type: {page_type}
+
+Focus areas by page type:
+- home: First impression, clarity, primary CTA visibility
+- booking_consult: Form simplicity, trust signals before form, mobile usability
+- services_index: Organization, navigation, outcome framing
+- service_detail: Specific treatment clarity, pricing hints, before/after proof, CTA placement
+- results_gallery: Image quality, organization, outcome messaging
+- reviews: Authenticity, recency, diversity, prominence
+- pricing_financing: Transparency, payment options, value framing
+- about_doctor: Credentials, approachability, trust building
+- contact_locations: Easy to find info, maps, hours, multi-location clarity
+
+Be specific and actionable. Use evidence from the HTML and screenshots.
+"""
+        
+        # Build input
+        content: List[Dict[str, Any]] = [
+            {
+                "type": "input_text",
+                "text": f"URL: {page_url}\n\nPage Type: {page_type}\n\nSignals: {json.dumps(signals, indent=2)}\n\nHTML (trimmed):\n{trimmed_html}",
+            }
+        ]
+        
+        # Add screenshots if available
+        if screenshot_desktop:
+            img = _img_to_data_url(screenshot_desktop)
+            if img:
+                content.append({"type": "input_image", "image_url": img})
+        
+        if screenshot_mobile:
+            img = _img_to_data_url(screenshot_mobile)
+            if img:
+                content.append({"type": "input_image", "image_url": img})
+        
+        # Try structured output first (Responses API)
+        try:
+            if hasattr(client, "responses") and hasattr(client.responses, "parse"):
+                response = client.responses.parse(
+                    model=OPENAI_MODEL_FALLBACKS[0],
+                    messages=[
+                        {"role": "system", "content": [{"type": "text", "text": sys_prompt}]},
+                        {"role": "user", "content": content},
+                    ],
+                    response_format=PageAnalysis,
+                )
+                data = _model_to_dict(response.parsed)
+                return data
+        except Exception as e:
+            print(f"[ANALYZE_PAGE] Structured output failed, falling back to JSON mode: {e}")
+        
+        # Fallback to JSON mode
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL_FALLBACKS[0],
+            messages=[
+                {"role": "system", "content": sys_prompt + "\n\nReturn output as JSON conforming to the PageAnalysis schema."},
+                {"role": "user", "content": json.dumps({"url": page_url, "signals": signals, "html": trimmed_html[:3000]})},
+            ],
+            response_format={"type": "json_object"},
+        )
+        
+        data = json.loads(response.choices[0].message.content or "{}")
+        return data
+        
+    except Exception as e:
+        print(f"[ANALYZE_PAGE] Error analyzing {page_url}: {e}")
+        return {
+            "page_type": page_type,
+            "summary": f"Analysis failed: {str(e)}",
+            "strengths": [],
+            "leaks": [],
+            "quick_wins": [],
+            "notes": {},
+            "error": str(e),
+        }
+
+
+def synthesize_deep_scan(page_analyses: List[Dict[str, Any]], clinic_name: str) -> Dict[str, Any]:
+    """Synthesize final deep scan report from individual page analyses.
+    
+    Args:
+        page_analyses: List of page analysis dicts (from analyze_single_page)
+        clinic_name: Name of the clinic
+    
+    Returns:
+        Synthesis dict conforming to DeepScanSynthesis schema
+    """
+    ok, msg = _ai_ready()
+    if not ok:
+        print(f"[SYNTHESIZE] AI unavailable: {msg}")
+        return {
+            "executive_summary": ["Deep scan synthesis unavailable - AI service not configured"],
+            "what_to_fix_first": "Configure AI service to enable synthesis",
+            "journey_map": [],
+            "action_plan": [],
+            "roadmap_90d": [],
+            "coverage": {"scanned_pages": [], "missing_recommended": []},
+            "error": msg,
+        }
+    
+    try:
+        client = OpenAI()  # type: ignore
+        
+        # Build summary of page analyses
+        pages_summary = []
+        for i, analysis in enumerate(page_analyses):
+            page_summary = {
+                "index": i + 1,
+                "url": analysis.get("url", "unknown"),
+                "page_type": analysis.get("page_type", "unknown"),
+                "summary": analysis.get("summary", ""),
+                "strengths_count": len(analysis.get("strengths", [])),
+                "leaks_count": len(analysis.get("leaks", [])),
+                "quick_wins_count": len(analysis.get("quick_wins", [])),
+                "key_findings": {
+                    "top_strength": analysis.get("strengths", [""])[0] if analysis.get("strengths") else "",
+                    "top_leak": analysis.get("leaks", [""])[0] if analysis.get("leaks") else "",
+                    "top_quick_win": analysis.get("quick_wins", [{}])[0].get("title", "") if analysis.get("quick_wins") else "",
+                }
+            }
+            pages_summary.append(page_summary)
+        
+        sys_prompt = f"""You are synthesizing a comprehensive deep scan report for {clinic_name}.
+
+You have analyzed {len(page_analyses)} pages. Your task is to create:
+
+1. **Executive Summary**: 5 key bullet points summarizing the most important findings
+2. **What to Fix First**: The single highest-priority recommendation
+3. **Patient Journey Map**: Map the patient journey across these steps:
+   - Land: First impression (home page)
+   - Understand: Learning about services
+   - Trust: Building confidence (reviews, credentials, proof)
+   - Choose: Treatment selection
+   - Commit: Booking/consultation
+   - Confirm: Follow-through
+   
+   For each step, identify:
+   - Which pages support this step
+   - Friction points
+   - Recommended fixes
+   - Risk level (HIGH/MED/LOW)
+
+4. **Action Plan**: Top 10 priority fixes ranked by impact/effort
+   - Each item should reference specific pages
+   - Rank 1 = highest priority, 10 = lower priority
+
+5. **90-Day Roadmap**: Break the action plan into 3 phases:
+   - Week 1-2: Quick wins and critical fixes
+   - Week 3-6: Medium-effort improvements
+   - Week 7-12: Longer-term enhancements
+
+6. **Coverage Report**: List scanned pages and any missing recommended page types
+
+Be specific and actionable. Cross-reference pages where relevant.
+"""
+        
+        # Try structured output
+        try:
+            if hasattr(client, "responses") and hasattr(client.responses, "parse"):
+                response = client.responses.parse(
+                    model=OPENAI_MODEL_FALLBACKS[0],
+                    messages=[
+                        {"role": "system", "content": [{"type": "text", "text": sys_prompt}]},
+                        {"role": "user", "content": [{"type": "input_text", "text": f"Page Analyses Summary:\n{json.dumps(pages_summary, indent=2)}"}]},
+                    ],
+                    response_format=DeepScanSynthesis,
+                )
+                data = _model_to_dict(response.parsed)
+                return data
+        except Exception as e:
+            print(f"[SYNTHESIZE] Structured output failed, falling back to JSON mode: {e}")
+        
+        # Fallback to JSON mode
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL_FALLBACKS[0],
+            messages=[
+                {"role": "system", "content": sys_prompt + "\n\nReturn output as JSON conforming to the DeepScanSynthesis schema."},
+                {"role": "user", "content": json.dumps({"pages": pages_summary})},
+            ],
+            response_format={"type": "json_object"},
+        )
+        
+        data = json.loads(response.choices[0].message.content or "{}")
+        return data
+        
+    except Exception as e:
+        print(f"[SYNTHESIZE] Error synthesizing deep scan: {e}")
+        return {
+            "executive_summary": [f"Synthesis failed: {str(e)}"],
+            "what_to_fix_first": "Unable to generate recommendation",
+            "journey_map": [],
+            "action_plan": [],
+            "roadmap_90d": [],
+            "coverage": {"scanned_pages": [], "missing_recommended": []},
+            "error": str(e),
+        }
+
+
 def analyze_pages(pages: List[Dict[str, Any]], target_url: str) -> Dict[str, Any]:
     """Analyze captured pages and generate scores.
     
@@ -2094,7 +2678,138 @@ def run_scan(scan_id: str, url: str, mode: str = "quick", max_pages: Optional[in
         )
         conn.commit()
 
-        # Score the pages
+        # Deep scan: perform per-page analysis and synthesis
+        if mode == "deep" and len(captured_pages) > 1:
+            print(f"[SCAN] Deep mode: analyzing {len(captured_pages)} pages individually")
+            
+            page_analyses = []
+            for i, page_data in enumerate(captured_pages):
+                page_url = page_data.get("url", "")
+                desktop_data = page_data.get("desktop", {})
+                mobile_data = page_data.get("mobile", {})
+                
+                # Skip if page had errors during capture
+                if desktop_data.get("error") and mobile_data.get("error"):
+                    print(f"[SCAN] Skipping analysis for {page_url} (capture failed)")
+                    page_analyses.append({
+                        "url": page_url,
+                        "page_type": "unknown",
+                        "summary": "Page capture failed",
+                        "strengths": [],
+                        "leaks": [],
+                        "quick_wins": [],
+                        "notes": {},
+                        "error": desktop_data.get("error"),
+                    })
+                    continue
+                
+                try:
+                    # Get HTML content (prefer desktop, fall back to mobile)
+                    html_content = desktop_data.get("html_content", "") or mobile_data.get("html_content", "")
+                    
+                    # If no HTML, use text sample
+                    if not html_content:
+                        text_sample = desktop_data.get("text_sample", "") or mobile_data.get("text_sample", "")
+                        html_content = f"<html><body>{text_sample}</body></html>"
+                    
+                    # Classify page type from evidence
+                    title = desktop_data.get("title", "") or mobile_data.get("title", "")
+                    h1 = desktop_data.get("h1", "") or mobile_data.get("h1", "")
+                    page_type = _classify_page_type(page_url, "", h1)
+                    
+                    # Extract signals
+                    signals = extract_page_signals(page_url, html_content, page_type)
+                    
+                    # Get screenshot paths
+                    screenshot_desktop = None
+                    screenshot_mobile = None
+                    if desktop_data.get("screenshot_urls"):
+                        screenshot_desktop = desktop_data["screenshot_urls"][0]
+                    if mobile_data.get("screenshot_urls"):
+                        screenshot_mobile = mobile_data["screenshot_urls"][0]
+                    
+                    # Analyze this page
+                    print(f"[SCAN] Analyzing page {i+1}/{len(captured_pages)}: {page_url} ({page_type})")
+                    analysis = analyze_single_page(
+                        page_url=page_url,
+                        page_type=page_type,
+                        html_content=html_content,
+                        screenshot_desktop=screenshot_desktop,
+                        screenshot_mobile=screenshot_mobile,
+                        signals=signals,
+                    )
+                    analysis["url"] = page_url  # Ensure URL is set
+                    page_analyses.append(analysis)
+                    
+                    # Store page analysis in database
+                    conn.execute(
+                        """
+                        INSERT INTO scan_pages 
+                        (scan_id, url, title, page_type, is_mobile, screenshot_paths, extracted_signals, analysis, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            scan_id,
+                            page_url,
+                            title[:200] if title else None,
+                            page_type,
+                            0,  # is_mobile = False for desktop analysis
+                            json.dumps({
+                                "desktop": desktop_data.get("screenshot_urls", []),
+                                "mobile": mobile_data.get("screenshot_urls", []),
+                            }),
+                            json.dumps(signals),
+                            json.dumps(analysis),
+                            now_iso(),
+                        ),
+                    )
+                    conn.commit()
+                    
+                except Exception as page_err:
+                    print(f"[SCAN] Error analyzing {page_url}: {page_err}")
+                    page_analyses.append({
+                        "url": page_url,
+                        "page_type": "unknown",
+                        "summary": f"Analysis error: {str(page_err)}",
+                        "strengths": [],
+                        "leaks": [],
+                        "quick_wins": [],
+                        "notes": {},
+                        "error": str(page_err),
+                    })
+            
+            # Synthesize deep scan results
+            print(f"[SCAN] Synthesizing deep scan results from {len(page_analyses)} page analyses")
+            clinic_name = infer_clinic_name(
+                home_page.get("desktop", {}).get("title", ""),
+                home_page.get("desktop", {}).get("h1", ""),
+                str(url)
+            )
+            
+            synthesis = synthesize_deep_scan(page_analyses, clinic_name)
+            
+            # Store synthesis in database
+            conn.execute(
+                """
+                INSERT INTO scan_summaries 
+                (scan_id, executive_summary, journey_map, action_plan, roadmap_90d, coverage, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scan_id,
+                    json.dumps(synthesis.get("executive_summary", [])),
+                    json.dumps(synthesis.get("journey_map", [])),
+                    json.dumps(synthesis.get("action_plan", [])),
+                    json.dumps(synthesis.get("roadmap_90d", [])),
+                    json.dumps(synthesis.get("coverage", {})),
+                    now_iso(),
+                ),
+            )
+            conn.commit()
+            
+            print(f"[SCAN] Deep scan synthesis complete and stored in database")
+
+        # Score the pages (this provides backward compatibility)
         output = analyze_pages(captured_pages, str(url))
 
         # Generate slug from clinic_name or fallback to domain
@@ -2363,6 +3078,133 @@ HOME_HTML_TEMPLATE = """
     .fine{margin-top:12px; font-size:12px; color:rgba(232,238,252,.58)}
     .foot{margin-top:18px; font-size:12px; color:rgba(232,238,252,.55)}
     code{background:rgba(255,255,255,.08); padding:2px 6px; border-radius:8px}
+    
+    /* Deep scan styles */
+    .fixFirstBox{
+      margin-top:20px; padding:16px; border-radius:12px;
+      background:linear-gradient(135deg, rgba(124,247,195,.15), rgba(122,162,255,.10));
+      border:1px solid rgba(124,247,195,.30);
+    }
+    .fixFirstLabel{
+      font-size:12px; font-weight:600; color:rgba(124,247,195,.85);
+      margin-bottom:8px; text-transform:uppercase; letter-spacing:0.5px;
+    }
+    .fixFirstText{color:rgba(232,238,252,.95); line-height:1.6}
+    
+    .pageAnalysisCard{
+      margin-bottom:16px; border-radius:12px;
+      border:1px solid rgba(255,255,255,.10);
+      background:rgba(255,255,255,.04);
+      overflow:hidden;
+    }
+    .pageAnalysisHeader{
+      padding:16px; cursor:pointer; display:flex; justify-content:space-between;
+      align-items:center; transition:background .2s;
+    }
+    .pageAnalysisHeader:hover{background:rgba(255,255,255,.06)}
+    .pageAnalysisTitle{display:flex; align-items:center; gap:12px; flex:1}
+    .pageAnalysisUrl{color:rgba(232,238,252,.75); font-size:14px}
+    .pageAnalysisToggle{font-size:18px; color:rgba(232,238,252,.50)}
+    .pageAnalysisBody{padding:0 16px 16px; display:none}
+    .pageAnalysisBody[style*="block"]{display:block}
+    .pageAnalysisSection{margin-top:16px}
+    .pageAnalysisSectionTitle{
+      font-weight:600; margin-bottom:8px; color:rgba(232,238,252,.85);
+      font-size:14px;
+    }
+    .pageAnalysisList{
+      list-style:none; padding:0; margin:0;
+    }
+    .pageAnalysisList li{
+      padding:8px 0; border-bottom:1px solid rgba(255,255,255,.05);
+    }
+    .pageAnalysisList li:last-child{border-bottom:none}
+    
+    .journeySteps{display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start}
+    .journeyStep{
+      flex:1; min-width:200px; padding:16px; border-radius:12px;
+      background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.10);
+    }
+    .journeyStepHeader{
+      display:flex; justify-content:space-between; align-items:center;
+      margin-bottom:12px;
+    }
+    .journeyStepName{font-weight:600; font-size:16px; color:var(--accent)}
+    .journeyRisk{
+      padding:4px 8px; border-radius:6px; font-size:11px;
+      font-weight:600; text-transform:uppercase;
+    }
+    .journeyRisk.riskhigh{background:rgba(255,100,100,.20); color:rgba(255,150,150,.95)}
+    .journeyRisk.riskmed{background:rgba(255,200,100,.20); color:rgba(255,220,150,.95)}
+    .journeyRisk.risklow{background:rgba(124,247,195,.20); color:rgba(124,247,195,.95)}
+    .journeyFriction, .journeyFixes{margin-top:12px; font-size:14px}
+    .journeyFriction strong, .journeyFixes strong{
+      color:rgba(232,238,252,.75); display:block; margin-bottom:6px;
+    }
+    .journeyFriction ul, .journeyFixes ul{
+      margin:0; padding-left:20px; color:rgba(232,238,252,.70);
+    }
+    .journeyArrow{
+      align-self:center; font-size:24px; color:rgba(232,238,252,.30);
+    }
+    
+    .actionItems{display:flex; flex-direction:column; gap:12px}
+    .actionItem{
+      display:flex; gap:16px; padding:16px; border-radius:12px;
+      background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.10);
+    }
+    .actionRank{
+      flex:0 0 40px; height:40px; border-radius:8px;
+      background:linear-gradient(135deg, var(--accent), var(--accent2));
+      display:flex; align-items:center; justify-content:center;
+      font-weight:700; font-size:18px; color:rgba(0,0,20,.95);
+    }
+    .actionContent{flex:1}
+    .actionTitle{font-weight:600; margin-bottom:6px; color:rgba(232,238,252,.95)}
+    .actionDescription{font-size:14px; color:rgba(232,238,252,.70); margin-bottom:8px}
+    .actionMeta{display:flex; gap:8px}
+    
+    .roadmapPhases{display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:16px}
+    .roadmapPhase{
+      padding:20px; border-radius:12px;
+      background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.10);
+    }
+    .roadmapPhaseHeader{margin-bottom:16px}
+    .roadmapPhaseName{
+      font-weight:700; font-size:18px; color:var(--accent);
+      margin-bottom:6px;
+    }
+    .roadmapPhaseFocus{font-size:14px; color:rgba(232,238,252,.70)}
+    .roadmapTasks{
+      list-style:none; padding:0; margin:0;
+    }
+    .roadmapTasks li{
+      padding:8px 0 8px 20px; position:relative;
+      border-bottom:1px solid rgba(255,255,255,.05); color:rgba(232,238,252,.85);
+    }
+    .roadmapTasks li:before{
+      content:'✓'; position:absolute; left:0; color:rgba(124,247,195,.70);
+    }
+    .roadmapTasks li:last-child{border-bottom:none}
+    
+    .pageTypeTag{
+      padding:4px 10px; border-radius:6px; font-size:11px;
+      font-weight:600; text-transform:uppercase; letter-spacing:0.5px;
+      background:rgba(122,162,255,.20); color:rgba(122,162,255,.95);
+    }
+    .pageTypeTag.home{background:rgba(255,200,100,.20); color:rgba(255,220,150,.95)}
+    .pageTypeTag.booking_consult{background:rgba(124,247,195,.20); color:rgba(124,247,195,.95)}
+    .pageTypeTag.service_detail{background:rgba(122,162,255,.20); color:rgba(122,162,255,.95)}
+    .pageTypeTag.services_index{background:rgba(122,162,255,.20); color:rgba(122,162,255,.95)}
+    .pageTypeTag.results_gallery{background:rgba(255,180,100,.20); color:rgba(255,200,140,.95)}
+    .pageTypeTag.reviews{background:rgba(255,180,100,.20); color:rgba(255,200,140,.95)}
+    .pageTypeTag.pricing_financing{background:rgba(255,150,200,.20); color:rgba(255,180,220,.95)}
+    .pageTypeTag.about_doctor{background:rgba(200,100,255,.20); color:rgba(220,180,255,.95)}
+    .pageTypeTag.contact_locations{background:rgba(200,100,255,.20); color:rgba(220,180,255,.95)}
+    .pageTypeTag.form_step{background:rgba(100,255,200,.20); color:rgba(140,255,220,.95)}
+    .pageTypeTag.blog{background:rgba(180,180,180,.20); color:rgba(220,220,220,.85)}
+    .pageTypeTag.other{background:rgba(180,180,180,.20); color:rgba(220,220,220,.85)}
+    .pageTypeTag.unknown{background:rgba(180,180,180,.20); color:rgba(220,220,220,.85)}
   </style>
 </head>
 <body>
@@ -2851,8 +3693,9 @@ def create_scan(req: ScanRequest):
 def get_scan(scan_id: str):
     conn = db()
     row = conn.execute("SELECT * FROM scans WHERE id=?", (scan_id,)).fetchone()
-    conn.close()
+    
     if not row:
+        conn.close()
         raise HTTPException(status_code=404, detail="Scan not found")
 
     # Determine entitlements based on scan mode
@@ -2860,6 +3703,49 @@ def get_scan(scan_id: str):
     entitlements = {
         "deep": mode == SCAN_MODE_DEEP
     }
+
+    # Fetch deep scan data if available
+    deep_scan_data = None
+    if mode == SCAN_MODE_DEEP:
+        # Fetch page analyses
+        page_rows = conn.execute(
+            "SELECT * FROM scan_pages WHERE scan_id=? ORDER BY id",
+            (scan_id,)
+        ).fetchall()
+        
+        # Fetch synthesis summary
+        summary_row = conn.execute(
+            "SELECT * FROM scan_summaries WHERE scan_id=?",
+            (scan_id,)
+        ).fetchone()
+        
+        if page_rows or summary_row:
+            deep_scan_data = {}
+            
+            if page_rows:
+                deep_scan_data["pages"] = [
+                    {
+                        "id": r["id"],
+                        "url": r["url"],
+                        "title": r["title"],
+                        "page_type": r["page_type"],
+                        "screenshot_paths": json.loads(r["screenshot_paths"]) if r["screenshot_paths"] else None,
+                        "extracted_signals": json.loads(r["extracted_signals"]) if r["extracted_signals"] else None,
+                        "analysis": json.loads(r["analysis"]) if r["analysis"] else None,
+                    }
+                    for r in page_rows
+                ]
+            
+            if summary_row:
+                deep_scan_data["synthesis"] = {
+                    "executive_summary": json.loads(summary_row["executive_summary"]) if summary_row["executive_summary"] else None,
+                    "journey_map": json.loads(summary_row["journey_map"]) if summary_row["journey_map"] else None,
+                    "action_plan": json.loads(summary_row["action_plan"]) if summary_row["action_plan"] else None,
+                    "roadmap_90d": json.loads(summary_row["roadmap_90d"]) if summary_row["roadmap_90d"] else None,
+                    "coverage": json.loads(summary_row["coverage"]) if summary_row["coverage"] else None,
+                }
+    
+    conn.close()
 
     resp = {
         "id": row["id"],
@@ -2872,6 +3758,7 @@ def get_scan(scan_id: str):
         "score": json.loads(row["score_json"]) if row["score_json"] else None,
         "evidence": json.loads(row["evidence_json"]) if row["evidence_json"] else None,
         "entitlements": entitlements,
+        "deep_scan": deep_scan_data,
     }
     return JSONResponse(resp)
 
@@ -4022,14 +4909,7 @@ REPORT_HTML_TEMPLATE = """
       text-transform:uppercase;
       letter-spacing:0.3px;
     }
-    .pageTypeTag.home{ background:rgba(122,162,255,.25); color:rgba(200,220,255,.95); }
-    .pageTypeTag.services{ background:rgba(124,247,195,.20); color:rgba(124,247,195,.95); }
-    .pageTypeTag.treatment{ background:rgba(255,200,100,.20); color:rgba(255,220,150,.95); }
-    .pageTypeTag.contact{ background:rgba(200,100,255,.20); color:rgba(220,180,255,.95); }
-    .pageTypeTag.reviews{ background:rgba(255,180,100,.20); color:rgba(255,200,140,.95); }
-    .pageTypeTag.booking{ background:rgba(100,255,200,.20); color:rgba(140,255,220,.95); }
-    .pageTypeTag.pricing{ background:rgba(255,150,200,.20); color:rgba(255,180,220,.95); }
-    .pageTypeTag.other{ background:rgba(180,180,180,.20); color:rgba(220,220,220,.85); }
+    /* Remove duplicate old-style pageTypeTag - using consolidated styles from deep scan section */
     .pageScore{
       font-size:13px;
       font-weight:700;
@@ -4398,6 +5278,31 @@ REPORT_HTML_TEMPLATE = """
     <div class="panel" id="deepSummaryPanel" style="display:none;">
       <h2>Executive Summary</h2>
       <div id="deepSummary"></div>
+    </div>
+
+    <div class="panel" id="executiveSummaryPanel" style="display:none;">
+      <h2>🎯 Executive Summary</h2>
+      <div id="executiveSummaryContent"></div>
+    </div>
+
+    <div class="panel" id="pageAnalysesPanel" style="display:none;">
+      <h2>📄 Page-by-Page Analysis</h2>
+      <div id="pageAnalysesList"></div>
+    </div>
+
+    <div class="panel" id="journeyMapPanel" style="display:none;">
+      <h2>🗺️ Patient Journey Map</h2>
+      <div id="journeyMapContent"></div>
+    </div>
+
+    <div class="panel" id="actionPlanPanel" style="display:none;">
+      <h2>✅ Top Action Plan</h2>
+      <div id="actionPlanContent"></div>
+    </div>
+
+    <div class="panel" id="roadmapPanel" style="display:none;">
+      <h2>📅 90-Day Roadmap</h2>
+      <div id="roadmapContent"></div>
     </div>
 
     <div class="panel" id="pagesScannedPanel" style="display:none;">
@@ -5593,6 +6498,35 @@ async function tick() {
       renderPageCritiques(score.page_critiques);
     }
   }
+  
+  // Render deep scan data if available
+  const deepScan = data.deep_scan || null;
+  if (deepScan) {
+    // Render executive summary from synthesis
+    if (deepScan.synthesis && deepScan.synthesis.executive_summary) {
+      renderExecutiveSummary(deepScan.synthesis.executive_summary, deepScan.synthesis.what_to_fix_first);
+    }
+    
+    // Render page analyses
+    if (deepScan.pages && deepScan.pages.length > 0) {
+      renderPageAnalyses(deepScan.pages);
+    }
+    
+    // Render journey map
+    if (deepScan.synthesis && deepScan.synthesis.journey_map) {
+      renderJourneyMap(deepScan.synthesis.journey_map);
+    }
+    
+    // Render action plan
+    if (deepScan.synthesis && deepScan.synthesis.action_plan) {
+      renderActionPlan(deepScan.synthesis.action_plan);
+    }
+    
+    // Render 90-day roadmap
+    if (deepScan.synthesis && deepScan.synthesis.roadmap_90d) {
+      renderRoadmap(deepScan.synthesis.roadmap_90d);
+    }
+  }
 
   if (debug) {
     document.getElementById('out').textContent = JSON.stringify(score || data, null, 2);
@@ -5602,6 +6536,245 @@ async function tick() {
     setTimeout(tick, 1200);
   }
 }
+
+// Deep scan rendering functions
+function renderExecutiveSummary(summary, whatToFixFirst) {
+  const panel = document.getElementById('executiveSummaryPanel');
+  const container = document.getElementById('executiveSummaryContent');
+  
+  if (!summary || summary.length === 0) {
+    if (panel) panel.style.display = 'none';
+    return;
+  }
+  
+  if (panel) panel.style.display = 'block';
+  if (!container) return;
+  
+  let html = '<ul class="summaryBullets">';
+  summary.forEach(bullet => {
+    html += `<li class="summaryBullet">${esc(bullet)}</li>`;
+  });
+  html += '</ul>';
+  
+  if (whatToFixFirst) {
+    html += `<div class="fixFirstBox">
+      <div class="fixFirstLabel">What to Fix First:</div>
+      <div class="fixFirstText">${esc(whatToFixFirst)}</div>
+    </div>`;
+  }
+  
+  container.innerHTML = html;
+}
+
+function renderPageAnalyses(pages) {
+  const panel = document.getElementById('pageAnalysesPanel');
+  const container = document.getElementById('pageAnalysesList');
+  
+  if (!pages || pages.length === 0) {
+    if (panel) panel.style.display = 'none';
+    return;
+  }
+  
+  if (panel) panel.style.display = 'block';
+  if (!container) return;
+  
+  let html = '';
+  pages.forEach((page, idx) => {
+    const analysis = page.analysis || {};
+    const pageType = analysis.page_type || page.page_type || 'unknown';
+    const summary = analysis.summary || 'No analysis available';
+    const strengths = analysis.strengths || [];
+    const leaks = analysis.leaks || [];
+    const quickWins = analysis.quick_wins || [];
+    
+    html += `<div class="pageAnalysisCard">
+      <div class="pageAnalysisHeader" onclick="togglePageAnalysis(${idx})">
+        <div class="pageAnalysisTitle">
+          <span class="pageTypeTag ${pageType}">${esc(pageType.replace('_', ' '))}</span>
+          <span class="pageAnalysisUrl">${esc(page.title || page.url)}</span>
+        </div>
+        <div class="pageAnalysisToggle" id="pageToggle${idx}">▼</div>
+      </div>
+      <div class="pageAnalysisBody" id="pageBody${idx}" style="display: none;">
+        <div class="pageAnalysisSection">
+          <div class="pageAnalysisSectionTitle">Summary</div>
+          <p>${esc(summary)}</p>
+        </div>`;
+    
+    if (strengths.length > 0) {
+      html += `<div class="pageAnalysisSection">
+        <div class="pageAnalysisSectionTitle">✓ Strengths</div>
+        <ul class="pageAnalysisList">`;
+      strengths.forEach(s => {
+        html += `<li>${esc(s)}</li>`;
+      });
+      html += `</ul></div>`;
+    }
+    
+    if (leaks.length > 0) {
+      html += `<div class="pageAnalysisSection">
+        <div class="pageAnalysisSectionTitle">⚠ Booking Leaks</div>
+        <ul class="pageAnalysisList">`;
+      leaks.forEach(l => {
+        html += `<li>${esc(l)}</li>`;
+      });
+      html += `</ul></div>`;
+    }
+    
+    if (quickWins.length > 0) {
+      html += `<div class="pageAnalysisSection">
+        <div class="pageAnalysisSectionTitle">⚡ Quick Wins</div>
+        <ul class="pageAnalysisList">`;
+      quickWins.forEach(qw => {
+        const title = qw.title || qw.action || '';
+        const impact = qw.impact || 'MED';
+        const effort = qw.effort || 'MED';
+        html += `<li>
+          <strong>${esc(title)}</strong>
+          <span class="chip chipImpact${impact}">Impact: ${esc(impact)}</span>
+          <span class="chip chipEffort${effort}">Effort: ${esc(effort)}</span>
+        </li>`;
+      });
+      html += `</ul></div>`;
+    }
+    
+    html += `</div></div>`;
+  });
+  
+  container.innerHTML = html;
+}
+
+function togglePageAnalysis(idx) {
+  const body = document.getElementById(`pageBody${idx}`);
+  const toggle = document.getElementById(`pageToggle${idx}`);
+  if (body && toggle) {
+    if (body.style.display === 'none') {
+      body.style.display = 'block';
+      toggle.textContent = '▲';
+    } else {
+      body.style.display = 'none';
+      toggle.textContent = '▼';
+    }
+  }
+}
+
+function renderJourneyMap(journeySteps) {
+  const panel = document.getElementById('journeyMapPanel');
+  const container = document.getElementById('journeyMapContent');
+  
+  if (!journeySteps || journeySteps.length === 0) {
+    if (panel) panel.style.display = 'none';
+    return;
+  }
+  
+  if (panel) panel.style.display = 'block';
+  if (!container) return;
+  
+  let html = '<div class="journeySteps">';
+  journeySteps.forEach((step, idx) => {
+    const riskClass = (step.risk || 'MED').toLowerCase();
+    html += `<div class="journeyStep">
+      <div class="journeyStepHeader">
+        <div class="journeyStepName">${esc(step.step)}</div>
+        <span class="journeyRisk risk${riskClass}">${esc(step.risk || 'MED')} Risk</span>
+      </div>`;
+    
+    if (step.friction && step.friction.length > 0) {
+      html += `<div class="journeyFriction">
+        <strong>Friction:</strong>
+        <ul>`;
+      step.friction.forEach(f => {
+        html += `<li>${esc(f)}</li>`;
+      });
+      html += `</ul></div>`;
+    }
+    
+    if (step.fixes && step.fixes.length > 0) {
+      html += `<div class="journeyFixes">
+        <strong>Recommended Fixes:</strong>
+        <ul>`;
+      step.fixes.forEach(f => {
+        html += `<li>${esc(f)}</li>`;
+      });
+      html += `</ul></div>`;
+    }
+    
+    html += `</div>`;
+    if (idx < journeySteps.length - 1) {
+      html += '<div class="journeyArrow">→</div>';
+    }
+  });
+  html += '</div>';
+  
+  container.innerHTML = html;
+}
+
+function renderActionPlan(actionItems) {
+  const panel = document.getElementById('actionPlanPanel');
+  const container = document.getElementById('actionPlanContent');
+  
+  if (!actionItems || actionItems.length === 0) {
+    if (panel) panel.style.display = 'none';
+    return;
+  }
+  
+  if (panel) panel.style.display = 'block';
+  if (!container) return;
+  
+  // Sort by rank
+  const sorted = [...actionItems].sort((a, b) => (a.rank || 99) - (b.rank || 99));
+  
+  let html = '<div class="actionItems">';
+  sorted.slice(0, 10).forEach(item => {
+    const impact = item.impact || 'MED';
+    const effort = item.effort || 'MED';
+    html += `<div class="actionItem">
+      <div class="actionRank">${item.rank || '?'}</div>
+      <div class="actionContent">
+        <div class="actionTitle">${esc(item.title)}</div>
+        <div class="actionDescription">${esc(item.description)}</div>
+        <div class="actionMeta">
+          <span class="chip chipImpact${impact}">Impact: ${esc(impact)}</span>
+          <span class="chip chipEffort${effort}">Effort: ${esc(effort)}</span>
+        </div>
+      </div>
+    </div>`;
+  });
+  html += '</div>';
+  
+  container.innerHTML = html;
+}
+
+function renderRoadmap(phases) {
+  const panel = document.getElementById('roadmapPanel');
+  const container = document.getElementById('roadmapContent');
+  
+  if (!phases || phases.length === 0) {
+    if (panel) panel.style.display = 'none';
+    return;
+  }
+  
+  if (panel) panel.style.display = 'block';
+  if (!container) return;
+  
+  let html = '<div class="roadmapPhases">';
+  phases.forEach(phase => {
+    html += `<div class="roadmapPhase">
+      <div class="roadmapPhaseHeader">
+        <div class="roadmapPhaseName">${esc(phase.phase)}</div>
+        <div class="roadmapPhaseFocus">${esc(phase.focus)}</div>
+      </div>
+      <ul class="roadmapTasks">`;
+    (phase.tasks || []).forEach(task => {
+      html += `<li>${esc(task)}</li>`;
+    });
+    html += `</ul></div>`;
+  });
+  html += '</div>';
+  
+  container.innerHTML = html;
+}
+
 tick();
 </script>
 </body>
