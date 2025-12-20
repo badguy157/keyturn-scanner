@@ -7102,6 +7102,29 @@ function renderErrors(errs) {
   }
 }
 
+// Helper function to determine scan type from scan data
+// Priority:
+// 1. Use scan_mode from API response
+// 2. Use mode from evidence.scan_metadata
+// 3. Infer from pages_scanned: > 1 => deep, else quick
+function determineScanType(data) {
+  // First, try to get explicit mode from API response
+  if (data.scan_mode) {
+    return data.scan_mode;
+  }
+  
+  // Next, try to get mode from evidence metadata
+  const ev = data.evidence || {};
+  const scanMetadata = ev.scan_metadata || {};
+  if (scanMetadata.mode) {
+    return scanMetadata.mode;
+  }
+  
+  // Fallback: infer from pages_scanned
+  const pagesScanned = scanMetadata.pages_scanned || 1;
+  return pagesScanned > 1 ? 'deep' : 'quick';
+}
+
 function statusNice(s) {
   const m = (s || "").toLowerCase();
   if (m === "queued") return "Queued...";
@@ -7565,7 +7588,9 @@ async function tick() {
     // Update status display from lightweight response
     const st = statusData.status || "loading";
     const err = statusData.error ? (" | " + statusData.error) : "";
-    document.getElementById('status').textContent = "Status: " + statusNice(st) + err;
+    const scanType = statusData.scan_mode || 'quick';
+    const scanTypeLabel = scanType === 'deep' ? 'Deep Scan' : 'Quick Scan';
+    document.getElementById('status').textContent = scanTypeLabel + " - Status: " + statusNice(st) + err;
     
     // Determine if we should continue polling based on status
     if (st === 'queued' || st === 'running' || st === 'scanning' || st === 'scoring') {
@@ -7610,8 +7635,8 @@ async function tick() {
         return;
       }
 
-      // Get scan mode from API response (primary) with fallback to evidence metadata
-      const scanMode = data.scan_mode || (data.evidence && data.evidence.scan_metadata && data.evidence.scan_metadata.mode) || 'quick';
+      // Get scan mode from API response (primary) with fallback to evidence metadata and pages_scanned
+      const scanMode = determineScanType(data);
       
       // Get entitlements and determine if deep scan is unlocked
       const entitlements = data.entitlements || {};
@@ -8144,14 +8169,32 @@ def report_page_public(slug_and_id: str, request: Request):
             og_title = "Patient-Flow Report"
             og_desc = f"Patient-Flow Score: {patient_flow_score}/10. {band}"
     else:
-        # Scan in progress - use hostname
+        # Scan in progress - use hostname and determine scan type
         url_str = row["url"]
         parsed_url = urlparse(url_str)
         hostname = parsed_url.netloc.replace("www.", "")
         
-        page_title = f"{hostname} - Scan in progress"
-        og_title = f"{hostname} - Patient-Flow Scan"
-        og_desc = "Scan in progress. Check back soon for detailed patient-flow analysis."
+        # Determine scan type from database record or infer from evidence
+        mode = row.get("mode")
+        scan_type_label = "Scan"
+        
+        if mode == "deep":
+            scan_type_label = "Deep Scan"
+        elif mode == "quick":
+            scan_type_label = "Quick Scan"
+        else:
+            # Infer from evidence if mode is not set
+            if evidence_json:
+                evidence = json.loads(evidence_json)
+                scan_metadata = evidence.get("scan_metadata", {})
+                pages_scanned = scan_metadata.get("pages_scanned", 1)
+                scan_type_label = "Deep Scan" if pages_scanned > 1 else "Quick Scan"
+            else:
+                scan_type_label = "Quick Scan"  # Default to Quick Scan
+        
+        page_title = f"{hostname} - {scan_type_label} in progress"
+        og_title = f"{hostname} - Patient-Flow {scan_type_label}"
+        og_desc = f"{scan_type_label} in progress. Check back soon for detailed patient-flow analysis."
     
     # Determine og:image
     og_image = f"{base_url}/android-chrome-512x512.png"  # Default fallback
