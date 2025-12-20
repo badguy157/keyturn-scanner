@@ -326,14 +326,21 @@ def row_to_dict(row):
     Convert a sqlite3.Row to a dictionary.
     
     Args:
-        row: A sqlite3.Row object or None
+        row: A sqlite3.Row object, dict, or None
     
     Returns:
         A dictionary with column names as keys, or None if row is None
     """
     if row is None:
         return None
-    return {k: row[k] for k in row.keys()}
+    if isinstance(row, dict):
+        return row
+    if isinstance(row, sqlite3.Row):
+        return {k: row[k] for k in row.keys()}
+    try:
+        return dict(row)
+    except (TypeError, ValueError):
+        return None
 
 
 def maybe_json(v):
@@ -8109,11 +8116,13 @@ def report_page_public(slug_and_id: str, request: Request):
     
     # Query database by public_id
     conn = db()
-    row = conn.execute("SELECT * FROM scans WHERE public_id=?", (public_id,)).fetchone()
+    row_raw = conn.execute("SELECT * FROM scans WHERE public_id=?", (public_id,)).fetchone()
     conn.close()
     
-    if not row:
+    if not row_raw:
         raise HTTPException(status_code=404, detail="Report not found")
+    
+    row = row_to_dict(row_raw) or {}
     
     scan_id = row["id"]
     db_slug = row["slug"]
