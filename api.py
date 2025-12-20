@@ -6252,7 +6252,6 @@ REPORT_HTML_TEMPLATE = """
         <div class="meta">
           <a id="siteUrl" href="#" target="_blank" rel="noopener" class="pill">Website</a>
           <span class="pill" id="band">Band</span>
-          <span class="pill" id="scanModeLabel">Quick Scan</span>
         </div>
         <div class="status" id="status">Loading...</div>
       </div>
@@ -7661,26 +7660,16 @@ async function tick() {
         pagesScannedLabel.style.display = 'inline';
       }
       
-      // Update scan mode label and subtitle
-      const scanModeLabel = document.getElementById('scanModeLabel');
+      // Update report subtitle based on scan mode
       const reportSubtitle = document.getElementById('reportSubtitle');
       
       if (scanMode === 'deep') {
         // Deep Scan mode
-        if (scanModeLabel) {
-          scanModeLabel.textContent = pagesScanned > 1 ? `Deep Scan (${pagesScanned} pages)` : 'Deep Scan';
-          scanModeLabel.style.background = 'linear-gradient(135deg, rgba(124,247,195,.25), rgba(122,162,255,.20))';
-          scanModeLabel.style.borderColor = 'rgba(124,247,195,.40)';
-          scanModeLabel.style.color = 'rgba(124,247,195,.95)';
-        }
         if (reportSubtitle) {
           reportSubtitle.textContent = 'Patient-Flow Deep Scan';
         }
       } else {
         // Quick Scan mode
-        if (scanModeLabel) {
-          scanModeLabel.textContent = 'Quick Scan';
-        }
         if (reportSubtitle) {
           reportSubtitle.textContent = 'Patient-Flow Quick Scan';
         }
