@@ -2288,13 +2288,16 @@ def _dedupe_evidence_pages(pages: List[str]) -> List[str]:
         if not page:
             continue
         
-        # Normalize for uniqueness check (trim + lowercase)
-        normalized = str(page).strip().lower()
+        # Trim once and reuse
+        trimmed = str(page).strip()
+        
+        # Normalize for uniqueness check (lowercase)
+        normalized = trimmed.lower()
         
         if normalized and normalized not in seen:
             seen.add(normalized)
             # Keep original casing from first occurrence
-            result.append(str(page).strip())
+            result.append(trimmed)
     
     return result
 
@@ -6511,7 +6514,7 @@ function getPageLabelFromUrl(url) {
 }
 
 // Helper function to deduplicate page labels/URLs
-// Normalizes by trimming and lowercasing for uniqueness, then re-title-cases for display
+// Normalizes by trimming and lowercasing for uniqueness, preserves original casing
 function uniquePages(pages) {
   if (!pages || !Array.isArray(pages)) return [];
   
@@ -6521,16 +6524,16 @@ function uniquePages(pages) {
   for (const page of pages) {
     if (!page) continue;
     
-    // Normalize for uniqueness check (trim + lowercase)
-    const normalized = String(page).trim().toLowerCase();
+    // Trim once and reuse
+    const trimmed = String(page).trim();
+    
+    // Normalize for uniqueness check (lowercase)
+    const normalized = trimmed.toLowerCase();
     
     if (normalized && !seen.has(normalized)) {
       seen.add(normalized);
-      // Title case the first occurrence for display
-      const trimmed = String(page).trim();
-      // Simple title case: uppercase first char, lowercase rest
-      const titleCased = trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
-      result.push(titleCased);
+      // Keep original casing from first occurrence
+      result.push(trimmed);
     }
   }
   
