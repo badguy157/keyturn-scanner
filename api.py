@@ -2266,6 +2266,42 @@ def _clamp_int(n: Any, lo: int = 0, hi: int = 10) -> int:
     return max(lo, min(hi, v))
 
 
+def _dedupe_evidence_pages(pages: List[str]) -> List[str]:
+    """Deduplicate evidence pages list while preserving order.
+    
+    Normalizes by trimming and lowercasing for uniqueness check,
+    then returns the original casing of the first occurrence.
+    
+    Args:
+        pages: List of page URLs that may contain duplicates
+    
+    Returns:
+        Deduplicated list of page URLs preserving original casing and order
+    """
+    if not pages:
+        return []
+    
+    seen = set()
+    result = []
+    
+    for page in pages:
+        if not page:
+            continue
+        
+        # Trim once and reuse
+        trimmed = str(page).strip()
+        
+        # Normalize for uniqueness check (lowercase)
+        normalized = trimmed.lower()
+        
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            # Keep original casing from first occurrence
+            result.append(trimmed)
+    
+    return result
+
+
 def _post_guardrails(output: Dict[str, Any], evidence: Dict[str, Any]) -> Dict[str, Any]:
     home_d = evidence.get("home_desktop", {})
     home_m = evidence.get("home_mobile", {})
@@ -2305,6 +2341,25 @@ def _post_guardrails(output: Dict[str, Any], evidence: Dict[str, Any]) -> Dict[s
     output["total_score_60"] = total
     output["patient_flow_score_10"] = score10
     output["band"] = band_from_score(score10)
+    
+    # Deduplicate evidence_pages in quick_wins_detailed
+    if output.get("quick_wins_detailed"):
+        for item in output["quick_wins_detailed"]:
+            if isinstance(item, dict) and "evidence_pages" in item:
+                item["evidence_pages"] = _dedupe_evidence_pages(item.get("evidence_pages", []))
+    
+    # Deduplicate evidence_pages in strengths_detailed
+    if output.get("strengths_detailed"):
+        for item in output["strengths_detailed"]:
+            if isinstance(item, dict) and "evidence_pages" in item:
+                item["evidence_pages"] = _dedupe_evidence_pages(item.get("evidence_pages", []))
+    
+    # Deduplicate evidence_pages in leaks_detailed
+    if output.get("leaks_detailed"):
+        for item in output["leaks_detailed"]:
+            if isinstance(item, dict) and "evidence_pages" in item:
+                item["evidence_pages"] = _dedupe_evidence_pages(item.get("evidence_pages", []))
+    
     return output
 
 
@@ -4564,6 +4619,7 @@ def get_scan(scan_id: str):
         "updated_at": row["updated_at"],
         "email": row["email"],
         "error": row["error"],
+        "scan_mode": mode,
         "score": json.loads(row["score_json"]) if row["score_json"] else None,
         "evidence": json.loads(row["evidence_json"]) if row["evidence_json"] else None,
         "entitlements": entitlements,
@@ -4578,6 +4634,7 @@ def get_scan_status(scan_id: str):
     
     Returns only essential fields needed for polling:
     - status: Current scan status
+    - scan_mode: Scan mode (quick or deep)
     - progress_step: Current progress step (if any)
     - progress_pct: Progress percentage (0-100)
     - error: Error message (if any)
@@ -4589,7 +4646,7 @@ def get_scan_status(scan_id: str):
     """
     conn = db()
     row = conn.execute(
-        "SELECT status, progress_step, progress_pct, error, updated_at FROM scans WHERE id=?",
+        "SELECT status, mode, progress_step, progress_pct, error, updated_at FROM scans WHERE id=?",
         (scan_id,)
     ).fetchone()
     
@@ -4599,8 +4656,11 @@ def get_scan_status(scan_id: str):
     
     conn.close()
     
+    mode = row["mode"] if row["mode"] else SCAN_MODE_QUICK
+    
     resp = {
         "status": row["status"],
+        "scan_mode": mode,
         "progress_step": row["progress_step"],
         "progress_pct": row["progress_pct"],
         "error": row["error"],
@@ -6166,7 +6226,7 @@ REPORT_HTML_TEMPLATE = """
     <div class="topbar">
       <div class="brand">
         <div class="name">__APP_NAME__</div>
-        <div class="sub">__PRODUCT__</div>
+        <div class="sub" id="reportSubtitle">__PRODUCT__</div>
       </div>
       <div class="actions">
         <a class="btn2" href="/">New scan</a>
@@ -6451,6 +6511,33 @@ function getPageLabelFromUrl(url) {
     
     return 'Page';
   }
+}
+
+// Helper function to deduplicate page labels/URLs
+// Normalizes by trimming and lowercasing for uniqueness, preserves original casing
+function uniquePages(pages) {
+  if (!pages || !Array.isArray(pages)) return [];
+  
+  const seen = new Set();
+  const result = [];
+  
+  for (const page of pages) {
+    if (!page) continue;
+    
+    // Trim once and reuse
+    const trimmed = String(page).trim();
+    
+    // Normalize for uniqueness check (lowercase)
+    const normalized = trimmed.toLowerCase();
+    
+    if (normalized && !seen.has(normalized)) {
+      seen.add(normalized);
+      // Keep original casing from first occurrence
+      result.push(trimmed);
+    }
+  }
+  
+  return result;
 }
 
 // Send report email function
@@ -6741,10 +6828,11 @@ function setList(id, items) {
         const impactClass = `chipImpact${impact}`;
         const effortClass = `chipEffort${effort}`;
         
-        // Add evidence pages pills if available
-        const evidencePills = (item.evidence_pages && item.evidence_pages.length) ? 
+        // Add evidence pages pills if available - deduplicate first
+        const deduped = uniquePages(item.evidence_pages || []);
+        const evidencePills = (deduped.length > 0) ? 
           `<div class="evidencePages" style="margin-top:6px;">
-            ${item.evidence_pages.slice(0, 5).map(url => {
+            ${deduped.slice(0, 5).map(url => {
               const label = getPageLabelFromUrl(url);
               return `<span class="evidencePill" data-url="${esc(url)}">${esc(label)}</span>`;
             }).join('')}
@@ -6805,9 +6893,10 @@ function setList(id, items) {
     } else if (item && typeof item === 'object') {
       // New structured format
       const text = item.strength || item.leak || item.title || item.why || '';
-      const evidencePills = (item.evidence_pages && item.evidence_pages.length) ? 
+      const deduped = uniquePages(item.evidence_pages || []);
+      const evidencePills = (deduped.length > 0) ? 
         `<div class="evidencePages" style="margin-top:6px;">
-          ${item.evidence_pages.slice(0, 5).map(url => {
+          ${deduped.slice(0, 5).map(url => {
             const label = getPageLabelFromUrl(url);
             return `<span class="evidencePill" data-url="${esc(url)}">${esc(label)}</span>`;
           }).join('')}
@@ -7521,14 +7610,16 @@ async function tick() {
         return;
       }
 
+      // Get scan mode from API response (primary) with fallback to evidence metadata
+      const scanMode = data.scan_mode || (data.evidence && data.evidence.scan_metadata && data.evidence.scan_metadata.mode) || 'quick';
+      
       // Get entitlements and determine if deep scan is unlocked
       const entitlements = data.entitlements || {};
       const isDeliverable = entitlements.deep === true;
       
-      // Get scan mode from evidence metadata (fallback)
+      // Get pages scanned from evidence metadata
       const ev = data.evidence || {};
       const scanMetadata = ev.scan_metadata || {};
-      const scanMode = scanMetadata.mode || 'quick';
       const pagesScanned = scanMetadata.pages_scanned || 1;
       
       // Update pages scanned label
@@ -7538,16 +7629,28 @@ async function tick() {
         pagesScannedLabel.style.display = 'inline';
       }
       
-      // Update scan mode label
+      // Update scan mode label and subtitle
       const scanModeLabel = document.getElementById('scanModeLabel');
-      if (scanModeLabel) {
-        if (scanMode === 'deep' || pagesScanned > 1) {
-          scanModeLabel.textContent = `Deep Scan (${pagesScanned} pages)`;
+      const reportSubtitle = document.getElementById('reportSubtitle');
+      
+      if (scanMode === 'deep') {
+        // Deep Scan mode
+        if (scanModeLabel) {
+          scanModeLabel.textContent = pagesScanned > 1 ? `Deep Scan (${pagesScanned} pages)` : 'Deep Scan';
           scanModeLabel.style.background = 'linear-gradient(135deg, rgba(124,247,195,.25), rgba(122,162,255,.20))';
           scanModeLabel.style.borderColor = 'rgba(124,247,195,.40)';
           scanModeLabel.style.color = 'rgba(124,247,195,.95)';
-        } else {
+        }
+        if (reportSubtitle) {
+          reportSubtitle.textContent = 'Patient-Flow Deep Scan';
+        }
+      } else {
+        // Quick Scan mode
+        if (scanModeLabel) {
           scanModeLabel.textContent = 'Quick Scan';
+        }
+        if (reportSubtitle) {
+          reportSubtitle.textContent = 'Patient-Flow Quick Scan';
         }
       }
       
